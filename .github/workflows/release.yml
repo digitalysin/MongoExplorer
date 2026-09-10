@@ -61,8 +61,9 @@ jobs:
           # Pushing with GITHUB_TOKEN does not start another run; [skip ci] makes
           # that explicit for anyone reading the history.
           git commit -am "chore: release $tag [skip ci]"
-          git tag "$tag"
-          git push origin HEAD:main --follow-tags
+          git tag -a "$tag" -m "Mongo Explorer $tag"
+          # Atomic: never leave a bumped main without the tag the build needs.
+          git push --atomic origin HEAD:main "refs/tags/$tag"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
   package:

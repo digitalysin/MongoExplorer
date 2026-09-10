@@ -4,8 +4,10 @@
   "version": "0.1.0",
   "description": "Cross-platform desktop GUI for MongoDB: saved connections, query editor, stats and import/export",
   "author": {
-    "name": "Mongo Explorer"
+    "name": "Mongo Explorer",
+    "email": "noreply@mongo-explorer.local"
   },
+  "homepage": "https://github.com/mongo-explorer/mongo-explorer",
   "license": "MIT",
   "private": true,
   "main": "dist/main/main.js",

@@ -144,6 +144,35 @@ async function main(): Promise<void> {
   await wait(2500);
   await shoot(window, '02-connected');
 
+  console.log('  a failed test must not outlive the field it described…');
+  await click(window, '.sidebar-header .btn-primary', '+ New');
+  await wait(600);
+  if ((await textOf(window, '.modal h2')) === '') throw new Error('the connection dialog did not open');
+  await fill(window, '.modal .input', 'Stale error check');
+  await click(window, '.modal .segmented button', 'Individual fields');
+  await wait(300);
+  if (!(await fill(window, '.modal input[placeholder="localhost:27017"]', 'no-such-host.invalid:27017'))) {
+    throw new Error('the hosts field is not visible in individual-fields mode');
+  }
+  await click(window, '.modal-footer .btn', 'Test connection');
+  // The driver keeps retrying until server selection times out, so this is not instant.
+  await wait(13_000);
+  const failure = await textOf(window, '.modal .error-box');
+  if (!/DNS returned no address/.test(failure)) {
+    throw new Error(`expected a DNS explanation, got: ${failure || '(no error shown)'}`);
+  }
+  await shoot(window, '03-connection-error');
+  // Editing the host makes the message stale — it must clear rather than describe the old value.
+  await fill(window, '.modal input[placeholder="localhost:27017"]', HOST);
+  await wait(400);
+  const afterEdit = await textOf(window, '.modal .error-box');
+  if (afterEdit.trim() !== '') {
+    throw new Error(`the stale error survived an edit: ${afterEdit}`);
+  }
+  await shoot(window, '04-error-cleared');
+  await click(window, '.modal-footer .btn', 'Cancel');
+  await wait(400);
+
   console.log('  creating a database…');
   if (!(await click(window, '.connection-row .icon-button[title="New database"]'))) {
     throw new Error('the New database action is missing from the connection row');
@@ -152,14 +181,14 @@ async function main(): Promise<void> {
   await fill(window, '.modal .input', CREATED_DATABASE);
   await fill(window, '.modal .field:last-of-type .input', 'events');
   await wait(200);
-  await shoot(window, '03-create-database');
+  await shoot(window, '05-create-database');
   await click(window, '.modal-footer .btn-primary', 'Create');
   await wait(2000);
   const tree = await textOf(window, '.tree-node.level-1');
   if (!tree.includes(CREATED_DATABASE)) {
     throw new Error(`the created database is not in the tree: ${tree}`);
   }
-  await shoot(window, '04-database-created');
+  await shoot(window, '06-database-created');
 
   console.log(`  opening the ${DATABASE} database…`);
   await click(window, '.tree-node.level-1', DATABASE);
@@ -168,29 +197,29 @@ async function main(): Promise<void> {
   console.log('  selecting the orders collection…');
   await click(window, '.tree-node.level-2', 'orders');
   await wait(400);
-  await shoot(window, '05-tree');
+  await shoot(window, '07-tree');
 
   console.log('  opening a query tab…');
   await click(window, '.titlebar-actions .btn', 'New query');
   await wait(600);
   await click(window, '.toolbar .btn-primary');
   await wait(2000);
-  await shoot(window, '06-query-results');
+  await shoot(window, '08-query-results');
 
   console.log('  switching the result to JSON…');
   await click(window, '.segmented button', 'JSON');
   await wait(500);
-  await shoot(window, '07-query-json');
+  await shoot(window, '09-query-json');
 
   console.log('  opening statistics…');
   await click(window, '.titlebar-actions .btn', 'Statistics');
   await wait(2500);
-  await shoot(window, '08-statistics');
+  await shoot(window, '10-statistics');
 
   console.log('  opening the create-index dialog…');
   await click(window, '.stats-section .btn', 'Create index');
   await wait(600);
-  await shoot(window, '09-create-index');
+  await shoot(window, '11-create-index');
   await click(window, '.modal-footer .btn', 'Cancel');
   await wait(300);
 
@@ -199,28 +228,28 @@ async function main(): Promise<void> {
   await wait(500);
   await click(window, '.cell-index');
   await wait(1200);
-  await shoot(window, '10-document-editor');
+  await shoot(window, '12-document-editor');
   await click(window, '.modal-footer .btn', 'Close');
   await wait(300);
 
   console.log('  opening the query library…');
   await click(window, '.toolbar .btn', 'History');
   await wait(900);
-  await shoot(window, '11-query-library');
+  await shoot(window, '13-query-library');
   await click(window, '.modal-footer .btn', 'Close');
   await wait(300);
 
   console.log('  opening the export dialog…');
   await click(window, '.titlebar-actions .btn', 'Export');
   await wait(600);
-  await shoot(window, '12-export');
+  await shoot(window, '14-export');
   await click(window, '.modal-footer .btn', 'Close');
   await wait(300);
 
   console.log('  opening settings…');
   await click(window, '.titlebar-actions .btn', 'Settings');
   await wait(1500);
-  await shoot(window, '13-settings');
+  await shoot(window, '15-settings');
 
   const client = new MongoClient(`mongodb://${HOST}`);
   await client.connect();

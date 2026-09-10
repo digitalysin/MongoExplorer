@@ -50,7 +50,13 @@ export function ConnectionDialog({
       .catch(() => setHasStoredPassword(false));
   }, [initial]);
 
-  const patch = (changes: Partial<Draft>) => setDraft((current) => ({ ...current, ...changes }));
+  // A test result describes the values as they were when it ran; once a field changes it is stale
+  // and only misleads, so it goes away with the edit.
+  const patch = (changes: Partial<Draft>) => {
+    setDraft((current) => ({ ...current, ...changes }));
+    setError(null);
+    setTestResult(null);
+  };
 
   const secrets = (): ConnectionSecrets => (password ? { password } : {});
 
@@ -59,9 +65,8 @@ export function ConnectionDialog({
     setError(null);
     setTestResult(null);
     try {
-      const info = initial?.id
-        ? await unwrap(api.connections.test(initial.id, secrets()))
-        : await unwrap(api.connections.testDraft(draft, secrets()));
+      // Always test what is on screen: testing the saved connection would ignore unsaved edits.
+      const info = await unwrap(api.connections.testDraft(draft, secrets()));
       setTestResult(info);
     } catch (caught) {
       setError(errorMessage(caught));

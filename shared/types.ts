@@ -356,7 +356,7 @@ export interface RendererApi {
     ): Promise<Result<ConnectionConfig>>;
     remove(id: string): Promise<Result<null>>;
     duplicate(id: string): Promise<Result<ConnectionConfig>>;
-    test(id: string, secrets?: ConnectionSecrets): Promise<Result<ServerInfo>>;
+    /** Tests the values on screen; pass the id of a saved connection to reuse its stored password. */
     testDraft(
       config: Partial<ConnectionConfig>,
       secrets?: ConnectionSecrets

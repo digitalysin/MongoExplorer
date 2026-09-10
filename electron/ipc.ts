@@ -18,7 +18,6 @@ import type {
 import {
   connectionHasSavedPassword,
   duplicateConnection,
-  getConnection,
   listConnections,
   removeConnection,
   resolveSecrets,
@@ -128,14 +127,12 @@ export function registerIpcHandlers(): void {
 
   handle('connections:duplicate', (id: string) => duplicateConnection(id));
 
-  handle('connections:test', (id: string, secrets?: ConnectionSecrets) =>
-    testConnection(getConnection(id), resolveSecrets(id, secrets))
-  );
-
+  // An edited draft keeps the id of the connection it came from, so a test can fall back to the
+  // stored password when the user did not retype one.
   handle(
     'connections:testDraft',
     (config: Partial<ConnectionConfig>, secrets?: ConnectionSecrets) =>
-      testConnection(config, secrets ?? {})
+      testConnection(config, config.id ? resolveSecrets(config.id, secrets) : (secrets ?? {}))
   );
 
   handle('connections:connect', (id: string, secrets?: ConnectionSecrets) => connect(id, secrets));

@@ -30,7 +30,6 @@ const api: RendererApi = {
       invoke('connections:save', config, secrets),
     remove: (id: string) => invoke('connections:remove', id),
     duplicate: (id: string) => invoke('connections:duplicate', id),
-    test: (id: string, secrets?: ConnectionSecrets) => invoke('connections:test', id, secrets),
     testDraft: (config: Partial<ConnectionConfig>, secrets?: ConnectionSecrets) =>
       invoke('connections:testDraft', config, secrets),
     connect: (id: string, secrets?: ConnectionSecrets) =>

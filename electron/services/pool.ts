@@ -6,6 +6,7 @@ import type {
   ConnectionSecrets,
   ServerInfo
 } from '../../shared/types.js';
+import { explainConnectionError } from './connectionErrors.js';
 import {
   buildClientOptions,
   buildConnectionUri,
@@ -28,7 +29,12 @@ export async function openClient(
 ): Promise<MongoClient> {
   const uri = buildConnectionUri(config, secrets);
   const client = new MongoClient(uri, buildClientOptions(config, secrets));
-  await client.connect();
+  try {
+    await client.connect();
+  } catch (error) {
+    await client.close().catch(() => undefined);
+    throw explainConnectionError(error, config);
+  }
   return client;
 }
 
@@ -59,7 +65,7 @@ export async function connect(
     return info;
   } catch (error) {
     await client.close().catch(() => undefined);
-    throw error;
+    throw explainConnectionError(error, config);
   }
 }
 

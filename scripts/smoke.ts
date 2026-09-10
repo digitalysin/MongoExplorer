@@ -12,7 +12,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { upsertConnection, removeConnection } from '../electron/services/connections.js';
-import { connect, disconnect, getDb } from '../electron/services/pool.js';
+import { connect, disconnect, getDb, testConnection } from '../electron/services/pool.js';
+import { explainConnectionError } from '../electron/services/connectionErrors.js';
 import { runQuery } from '../electron/services/query.js';
 import {
   collectionStats,
@@ -828,6 +829,96 @@ async function main(): Promise<void> {
         ),
       (error: Error) => /mongosh/.test(error.message)
     );
+  });
+
+  // --- connection error messages -------------------------------------------
+
+  await check('an unresolvable host explains itself as a DNS failure', async () => {
+    await assert.rejects(
+      () =>
+        testConnection(
+          {
+            mode: 'fields',
+            hosts: ['database-prd-mongo-does-not-exist.invalid:27017'],
+            serverSelectionTimeoutMs: 3000
+          },
+          {}
+        ),
+      (error: Error) => {
+        assert.match(error.message, /DNS returned no address/);
+        assert.match(error.message, /database-prd-mongo-does-not-exist\.invalid/);
+        assert.match(error.message, /VPN/);
+        assert.ok(error.cause, 'the driver error should be kept as the cause');
+        return true;
+      }
+    );
+  });
+
+  await check('a refused port is reported as nothing listening', async () => {
+    // Port 1 is reachable on loopback and never has a listener.
+    await assert.rejects(
+      () =>
+        testConnection(
+          { mode: 'fields', hosts: ['127.0.0.1:1'], serverSelectionTimeoutMs: 3000 },
+          {}
+        ),
+      (error: Error) => {
+        assert.match(error.message, /refused the connection|did not respond|Could not reach/);
+        return true;
+      }
+    );
+  });
+
+  await check('driver errors are unwrapped from a server-selection failure', () => {
+    // Shape of a real MongoServerSelectionError: the cause hides in the topology description.
+    const inner = Object.assign(new Error('getaddrinfo ENOTFOUND mongo.internal'), {
+      code: 'ENOTFOUND',
+      syscall: 'getaddrinfo',
+      hostname: 'mongo.internal'
+    });
+    const selection = Object.assign(new Error('Server selection timed out after 10000 ms'), {
+      servers: new Map([['mongo.internal:27017', { error: inner }]])
+    });
+    const explained = explainConnectionError(selection, { mode: 'fields', hosts: ['mongo.internal'] });
+    assert.match(explained.message, /DNS returned no address for "mongo\.internal"/);
+    assert.equal(explained.cause, selection);
+  });
+
+  await check('an SRV lookup failure names the SRV record', () => {
+    const explained = explainConnectionError(
+      Object.assign(new Error('querySrv ENOTFOUND _mongodb._tcp.cluster0.example.net'), {
+        code: 'ENOTFOUND'
+      }),
+      { mode: 'uri', uri: 'mongodb+srv://cluster0.example.net' }
+    );
+    assert.match(explained.message, /No SRV record/);
+    assert.match(explained.message, /cluster0\.example\.net/);
+  });
+
+  await check('authentication failures name the auth database', () => {
+    const explained = explainConnectionError(new Error('Authentication failed.'), {
+      mode: 'fields',
+      username: 'reporting',
+      authDatabase: 'admin'
+    });
+    assert.match(explained.message, /Authentication failed for "reporting"/);
+    assert.match(explained.message, /"admin" database/);
+  });
+
+  await check('a TLS certificate rejection suggests the CA or the override', () => {
+    const explained = explainConnectionError(
+      Object.assign(new Error('self signed certificate in certificate chain'), {
+        code: 'SELF_SIGNED_CERT_IN_CHAIN'
+      }),
+      { mode: 'fields', hosts: ['db.internal'] }
+    );
+    assert.match(explained.message, /TLS certificate was rejected/);
+    assert.match(explained.message, /CA file/);
+  });
+
+  await check('an unrecognised error is passed through untouched', () => {
+    const original = new Error('something entirely unexpected');
+    assert.equal(explainConnectionError(original, { mode: 'fields' }), original);
   });
 
   // --- secret storage ------------------------------------------------------

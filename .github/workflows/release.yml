@@ -65,6 +65,12 @@ jobs:
           # Atomic: never leave a bumped main without the tag the build needs.
           git push --atomic origin HEAD:main "refs/tags/$tag"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      # Create the draft here, once. Left to themselves the three package jobs
+      # race and each creates its own release, splitting the installers.
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "${{ steps.bump.outputs.tag }}" --draft --title "${{ steps.bump.outputs.tag }}" --notes 'Packaging…'
 
   package:
     name: Package ${{ matrix.os }}
@@ -107,6 +113,15 @@ jobs:
           TAG: ${{ needs.version.outputs.tag }}
         run: |
           set -euo pipefail
+          # A missing platform means a package job uploaded somewhere unexpected;
+          # better to fail than to publish half a release.
+          assets=$(gh release view "$TAG" --json assets -q '.assets[].name')
+          for required in '\.dmg$' '\.exe$' '\.AppImage$' '\.deb$'; do
+            echo "$assets" | grep -qE "$required" || {
+              echo "no asset matching $required in $TAG:"; echo "$assets"; exit 1;
+            }
+          done
+
           previous=$(git describe --tags --abbrev=0 "$TAG^" 2>/dev/null || true)
           if [ -n "$previous" ]; then
             notes=$(git log --pretty='- %s' "$previous..$TAG" --no-merges)

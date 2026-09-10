@@ -1,0 +1,589 @@
+/**
+ * End-to-end check of the main-process services against a real mongod.
+ * Runs inside Electron (so `app`, `safeStorage` and the driver behave exactly
+ * as they do in the shipped app):
+ *
+ *   mongod --dbpath /tmp/... --port 27099
+ *   npm run smoke
+ */
+import { app } from 'electron';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { upsertConnection, removeConnection } from '../electron/services/connections.js';
+import { connect, disconnect, getDb } from '../electron/services/pool.js';
+import { runQuery } from '../electron/services/query.js';
+import {
+  collectionStats,
+  databaseStats,
+  indexesFor,
+  listCollections,
+  listDatabases
+} from '../electron/services/stats.js';
+import { exportCollection, importCollection } from '../electron/services/transfer.js';
+import { detectTools, runTool } from '../electron/services/tools.js';
+import { encryptionAvailable, getSecrets, setSecrets } from '../electron/services/store.js';
+
+const HOST = '127.0.0.1:27099';
+const DATABASE = 'mongo_explorer_smoke';
+const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mongoexp-smoke-'));
+
+let passed = 0;
+let failed = 0;
+
+async function check(name: string, fn: () => Promise<void> | void): Promise<void> {
+  try {
+    await fn();
+    passed += 1;
+    console.log(`  ok  ${name}`);
+  } catch (error) {
+    failed += 1;
+    console.error(`FAIL  ${name}`);
+    console.error(`      ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+const silent = () => undefined;
+
+async function main(): Promise<void> {
+  app.setPath('userData', path.join(workDir, 'userData'));
+
+  const connection = upsertConnection({
+    name: 'Smoke test',
+    mode: 'fields',
+    hosts: [HOST],
+    savePassword: false,
+    serverSelectionTimeoutMs: 5000
+  });
+
+  const info = await connect(connection.id);
+  console.log(`\nConnected to MongoDB ${info.serverVersion} (${info.topology})\n`);
+
+  const db = getDb(connection.id, DATABASE);
+  await db.dropDatabase().catch(() => undefined);
+
+  const query = (code: string, limit = 200) =>
+    runQuery({ connectionId: connection.id, database: DATABASE, code, limit });
+
+  // --- queries -------------------------------------------------------------
+
+  await check('insertMany reports an acknowledgement', async () => {
+    const result = await query(`db.people.insertMany([
+      { name: "Ada", age: 36, tags: ["math"], joined: ISODate("2020-01-02T03:04:05Z"), address: { city: "London" } },
+      { name: "Linus", age: 54, tags: ["kernel", "git"], joined: ISODate("2021-06-07T08:09:10Z"), address: { city: "Portland" } },
+      { name: "Grace", age: 45, tags: [], joined: ISODate("2019-11-12T13:14:15Z"), address: { city: "New York" } }
+    ])`);
+    assert.equal(result.kind, 'acknowledgement');
+    const value = result.value as { insertedIds: Record<string, unknown> };
+    assert.equal(Object.keys(value.insertedIds).length, 3);
+  });
+
+  await check('find returns documents, columns and relaxed EJSON', async () => {
+    const result = await query('db.people.find({}).sort({ age: 1 })');
+    assert.equal(result.kind, 'documents');
+    assert.equal(result.totalReturned, 3);
+    assert.equal(result.collection, 'people');
+    assert.equal(result.operation, 'find');
+    assert.equal(result.columns[0], '_id');
+    assert.ok(result.columns.includes('name'));
+    const first = result.documents[0] as Record<string, any>;
+    assert.equal(first.name, 'Ada');
+    assert.equal(typeof first._id.$oid, 'string', 'ObjectId must serialize as $oid');
+    assert.equal(typeof first.joined.$date, 'string', 'Date must serialize as $date');
+  });
+
+  await check('cursor chaining and limits are honoured', async () => {
+    const result = await query('db.people.find({}).sort({ age: -1 }).limit(2)');
+    assert.equal(result.totalReturned, 2);
+    assert.equal((result.documents[0] as { name: string }).name, 'Linus');
+  });
+
+  await check('the row limit truncates and flags the result', async () => {
+    const result = await query('db.people.find({})', 2);
+    assert.equal(result.totalReturned, 2);
+    assert.equal(result.truncated, true);
+  });
+
+  await check('aggregate pipelines run', async () => {
+    const result = await query(
+      'db.people.aggregate([{ $group: { _id: "$address.city", total: { $sum: 1 } } }, { $sort: { _id: 1 } }])'
+    );
+    assert.equal(result.totalReturned, 3);
+    assert.equal((result.documents[0] as { _id: string })._id, 'London');
+  });
+
+  await check('scalar results come back as values', async () => {
+    const result = await query('db.people.countDocuments({ age: { $gt: 40 } })');
+    assert.equal(result.kind, 'value');
+    assert.equal(result.value, 2);
+  });
+
+  await check('mongosh aliases resolve (count, getIndexes)', async () => {
+    const count = await query('db.people.count({})');
+    assert.equal(count.value, 3);
+    const indexes = await query('db.people.getIndexes()');
+    assert.equal(indexes.kind, 'documents');
+    assert.ok(indexes.totalReturned >= 1);
+  });
+
+  await check('ObjectId() and ISODate() helpers work in filters', async () => {
+    const one = await query('db.people.findOne({ name: "Ada" })');
+    const id = (one.documents[0] as { _id: { $oid: string } })._id.$oid;
+    const byId = await query(`db.people.find({ _id: ObjectId("${id}") })`);
+    assert.equal(byId.totalReturned, 1);
+    // `new ObjectId(...)` must keep working too.
+    const withNew = await query(`db.people.find({ _id: new ObjectId("${id}") })`);
+    assert.equal(withNew.totalReturned, 1);
+    const decimal = await query('return NumberDecimal("12.5").toString()');
+    assert.equal(decimal.value, '12.5');
+    const long = await query('return NumberLong("9007199254740993").toString()');
+    assert.equal(long.value, '9007199254740993');
+    const byDate = await query('db.people.find({ joined: { $gt: ISODate("2020-06-01") } })');
+    assert.equal(byDate.totalReturned, 1);
+  });
+
+  await check('multi-statement scripts run with an explicit return', async () => {
+    const result = await query(`
+      const cutoff = 40;
+      const rows = await db.people.find({ age: { $gt: cutoff } }).toArray();
+      return rows.map((row) => ({ name: row.name }));
+    `);
+    assert.equal(result.totalReturned, 2);
+    assert.ok('name' in (result.documents[0] as Record<string, unknown>));
+  });
+
+  await check('scripts without a return still yield their last statement', async () => {
+    const result = await query(`
+      const minimum = 50;
+      db.people.find({ age: { $gt: minimum } })
+    `);
+    assert.equal(result.totalReturned, 1);
+  });
+
+  await check('db-level helpers are available', async () => {
+    const names = await query('db.getCollectionNames()');
+    assert.ok((names.documents as unknown[]).length >= 1 || names.kind === 'documents');
+    const stats = await query('db.stats()');
+    assert.equal(stats.kind, 'documents');
+  });
+
+  await check('explain returns a query plan', async () => {
+    const result = await runQuery({
+      connectionId: connection.id,
+      database: DATABASE,
+      code: 'db.people.find({ age: { $gt: 40 } })',
+      explain: 'executionStats'
+    });
+    assert.ok(result.explain, 'expected an explain payload');
+    assert.ok(JSON.stringify(result.explain).includes('winningPlan'));
+  });
+
+  await check('syntax errors surface as readable messages', async () => {
+    await assert.rejects(
+      () => query('db.people.find({'),
+      (error: Error) => error.message.startsWith('Syntax error:')
+    );
+  });
+
+  await check('queries cannot reach Node globals', async () => {
+    const result = await query('return typeof require + "," + typeof process');
+    assert.equal(result.value, 'undefined,undefined');
+  });
+
+  // --- statistics ----------------------------------------------------------
+
+  await check('listDatabases and listCollections describe the deployment', async () => {
+    const databases = await listDatabases(connection.id);
+    assert.ok(databases.some((entry) => entry.name === DATABASE));
+    const collections = await listCollections(connection.id, DATABASE);
+    const people = collections.find((entry) => entry.name === 'people');
+    assert.ok(people, 'people collection missing');
+    assert.equal(people!.type, 'collection');
+    assert.equal(people!.documentCount, 3);
+  });
+
+  await check('collection statistics include indexes and sampled fields', async () => {
+    await db.collection('people').createIndex({ name: 1 }, { unique: true });
+    const stats = await collectionStats(connection.id, DATABASE, 'people');
+    assert.equal(stats.documentCount, 3);
+    assert.ok(stats.dataSizeBytes > 0);
+    assert.ok(stats.storageSizeBytes > 0);
+    assert.equal(stats.indexCount, 2);
+    assert.ok(stats.indexes.some((index) => index.name === 'name_1' && index.unique));
+    assert.ok(stats.sampledFields.some((field) => field.field === 'name'));
+    assert.equal(stats.sampledFields.find((field) => field.field === '_id')?.presencePercent, 100);
+  });
+
+  await check('database statistics aggregate the collections', async () => {
+    const stats = await databaseStats(connection.id, DATABASE);
+    assert.equal(stats.name, DATABASE);
+    assert.ok(stats.objectCount >= 3);
+    assert.ok(stats.collections.some((entry) => entry.name === 'people'));
+    assert.ok(stats.indexSizeBytes > 0);
+  });
+
+  await check('index listing reports keys and usage', async () => {
+    const indexes = await indexesFor(connection.id, DATABASE, 'people');
+    const unique = indexes.find((index) => index.name === 'name_1');
+    assert.ok(unique);
+    assert.deepEqual(unique!.keys, { name: 1 });
+    assert.equal(unique!.unique, true);
+  });
+
+  // --- export / import (native) --------------------------------------------
+
+  const jsonFile = path.join(workDir, 'people.json');
+  const ndjsonFile = path.join(workDir, 'people.ndjson');
+  const csvFile = path.join(workDir, 'people.csv');
+
+  await check('export to a JSON array', async () => {
+    const result = await exportCollection(
+      {
+        connectionId: connection.id,
+        database: DATABASE,
+        collection: 'people',
+        format: 'json-array',
+        filePath: jsonFile,
+        prettyPrint: false
+      },
+      silent
+    );
+    assert.equal(result.processed, 3);
+    const parsed = JSON.parse(fs.readFileSync(jsonFile, 'utf8'));
+    assert.equal(parsed.length, 3);
+    assert.ok(parsed[0]._id.$oid, 'exported _id should be EJSON');
+  });
+
+  await check('export honours filter, projection and sort', async () => {
+    const filtered = path.join(workDir, 'filtered.json');
+    const result = await exportCollection(
+      {
+        connectionId: connection.id,
+        database: DATABASE,
+        collection: 'people',
+        format: 'json-array',
+        filePath: filtered,
+        filter: '{ age: { $gt: 40 } }',
+        projection: '{ name: 1, _id: 0 }',
+        sort: '{ name: 1 }'
+      },
+      silent
+    );
+    assert.equal(result.processed, 2);
+    const parsed = JSON.parse(fs.readFileSync(filtered, 'utf8'));
+    assert.deepEqual(parsed, [{ name: 'Grace' }, { name: 'Linus' }]);
+  });
+
+  await check('export to NDJSON writes one document per line', async () => {
+    await exportCollection(
+      {
+        connectionId: connection.id,
+        database: DATABASE,
+        collection: 'people',
+        format: 'ndjson',
+        filePath: ndjsonFile
+      },
+      silent
+    );
+    const lines = fs.readFileSync(ndjsonFile, 'utf8').trim().split('\n');
+    assert.equal(lines.length, 3);
+    assert.ok(JSON.parse(lines[0]).name);
+  });
+
+  await check('export to CSV flattens nested fields', async () => {
+    await exportCollection(
+      {
+        connectionId: connection.id,
+        database: DATABASE,
+        collection: 'people',
+        format: 'csv',
+        filePath: csvFile
+      },
+      silent
+    );
+    const text = fs.readFileSync(csvFile, 'utf8').trim();
+    const [header, ...rows] = text.split('\n');
+    assert.ok(header.startsWith('_id'), `unexpected header: ${header}`);
+    assert.ok(header.includes('address.city'), 'nested fields should become dot-paths');
+    assert.equal(rows.length, 3);
+    assert.ok(/^[0-9a-f]{24},/.test(rows[0]), 'ObjectId should be written as a plain hex string');
+  });
+
+  await check('import a JSON array into a new collection', async () => {
+    const result = await importCollection(
+      {
+        connectionId: connection.id,
+        database: DATABASE,
+        collection: 'from_json',
+        format: 'json-array',
+        filePath: jsonFile,
+        mode: 'insert'
+      },
+      silent
+    );
+    assert.equal(result.processed, 3);
+    assert.equal(result.failed, 0);
+    const count = await db.collection('from_json').countDocuments();
+    assert.equal(count, 3);
+    const ada = await db.collection('from_json').findOne({ name: 'Ada' });
+    assert.ok(ada?.joined instanceof Date, 'EJSON dates should be restored as BSON dates');
+    assert.equal(ada?.address?.city, 'London');
+  });
+
+  await check('import NDJSON with format auto-detection', async () => {
+    const result = await importCollection(
+      {
+        connectionId: connection.id,
+        database: DATABASE,
+        collection: 'from_ndjson',
+        format: 'auto',
+        filePath: ndjsonFile,
+        mode: 'insert'
+      },
+      silent
+    );
+    assert.equal(result.processed, 3);
+    assert.equal(await db.collection('from_ndjson').countDocuments(), 3);
+  });
+
+  await check('import CSV infers types and rebuilds nested paths', async () => {
+    const result = await importCollection(
+      {
+        connectionId: connection.id,
+        database: DATABASE,
+        collection: 'from_csv',
+        format: 'csv',
+        filePath: csvFile,
+        mode: 'insert',
+        csvHasHeader: true,
+        csvInferTypes: true
+      },
+      silent
+    );
+    assert.equal(result.processed, 3);
+    const linus = await db.collection('from_csv').findOne({ name: 'Linus' });
+    assert.equal(linus?.age, 54, 'numbers should be coerced');
+    assert.equal(linus?.address?.city, 'Portland', 'dot-path headers should nest');
+  });
+
+  await check('CSV quoting survives commas, quotes and newlines', async () => {
+    const trickyPath = path.join(workDir, 'tricky.csv');
+    fs.writeFileSync(
+      trickyPath,
+      'name,note\n"Smith, John","He said ""hi""\nsecond line"\nplain,simple\n'
+    );
+    const result = await importCollection(
+      {
+        connectionId: connection.id,
+        database: DATABASE,
+        collection: 'tricky',
+        format: 'csv',
+        filePath: trickyPath,
+        mode: 'insert'
+      },
+      silent
+    );
+    assert.equal(result.processed, 2);
+    const row = await db.collection('tricky').findOne({ name: 'Smith, John' });
+    assert.equal(row?.note, 'He said "hi"\nsecond line');
+  });
+
+  await check('upsert mode merges instead of duplicating', async () => {
+    const before = await db.collection('from_json').countDocuments();
+    const result = await importCollection(
+      {
+        connectionId: connection.id,
+        database: DATABASE,
+        collection: 'from_json',
+        format: 'json-array',
+        filePath: jsonFile,
+        mode: 'upsert',
+        upsertFields: ['name']
+      },
+      silent
+    );
+    assert.equal(result.failed, 0);
+    assert.equal(await db.collection('from_json').countDocuments(), before);
+  });
+
+  await check('insert mode reports duplicate-key failures without throwing', async () => {
+    const result = await importCollection(
+      {
+        connectionId: connection.id,
+        database: DATABASE,
+        collection: 'from_json',
+        format: 'json-array',
+        filePath: jsonFile,
+        mode: 'insert'
+      },
+      silent
+    );
+    assert.equal(result.ok, false);
+    assert.equal(result.failed, 3);
+    assert.ok(result.errors.length > 0);
+  });
+
+  await check('drop-before-import replaces the collection contents', async () => {
+    const result = await importCollection(
+      {
+        connectionId: connection.id,
+        database: DATABASE,
+        collection: 'from_json',
+        format: 'json-array',
+        filePath: jsonFile,
+        mode: 'insert',
+        dropBeforeImport: true
+      },
+      silent
+    );
+    assert.equal(result.processed, 3);
+    assert.equal(await db.collection('from_json').countDocuments(), 3);
+  });
+
+  await check('a large NDJSON file streams through in batches', async () => {
+    const bulkPath = path.join(workDir, 'bulk.ndjson');
+    const stream = fs.createWriteStream(bulkPath);
+    for (let index = 0; index < 5000; index += 1) {
+      stream.write(`${JSON.stringify({ index, group: index % 7, label: `row-${index}` })}\n`);
+    }
+    await new Promise<void>((resolve) => stream.end(resolve));
+
+    const result = await importCollection(
+      {
+        connectionId: connection.id,
+        database: DATABASE,
+        collection: 'bulk',
+        format: 'ndjson',
+        filePath: bulkPath,
+        mode: 'insert',
+        batchSize: 500
+      },
+      silent
+    );
+    assert.equal(result.processed, 5000);
+    assert.equal(await db.collection('bulk').countDocuments(), 5000);
+
+    const roundTrip = path.join(workDir, 'bulk-out.json');
+    const exported = await exportCollection(
+      {
+        connectionId: connection.id,
+        database: DATABASE,
+        collection: 'bulk',
+        format: 'json-array',
+        filePath: roundTrip
+      },
+      silent
+    );
+    assert.equal(exported.processed, 5000);
+    assert.equal(JSON.parse(fs.readFileSync(roundTrip, 'utf8')).length, 5000);
+  });
+
+  // --- optional external tools --------------------------------------------
+
+  let dumpAvailable = false;
+  await check('tool detection finds the installed database tools', async () => {
+    const detections = await detectTools();
+    assert.equal(detections.length, 5);
+    const dump = detections.find((entry) => entry.tool === 'mongodump');
+    assert.ok(dump);
+    dumpAvailable = Boolean(dump!.ok);
+    if (dumpAvailable) {
+      assert.ok(dump!.path?.endsWith('mongodump'));
+      assert.ok(dump!.version, 'expected a version string');
+    }
+  });
+
+  if (dumpAvailable) {
+    const dumpDir = path.join(workDir, 'dump');
+    await check('mongodump runs with the resolved path', async () => {
+      const result = await runTool(
+        {
+          connectionId: connection.id,
+          tool: 'mongodump',
+          database: DATABASE,
+          collection: 'people',
+          target: dumpDir
+        },
+        silent
+      );
+      assert.equal(result.ok, true);
+      const bson = path.join(dumpDir, DATABASE, 'people.bson');
+      assert.ok(fs.existsSync(bson), `expected ${bson} to exist`);
+      assert.ok(fs.statSync(bson).size > 0);
+    });
+
+    await check('mongorestore reloads a dump into a new collection', async () => {
+      const restoreTools = await detectTools();
+      if (!restoreTools.find((entry) => entry.tool === 'mongorestore')?.ok) return;
+      await db.collection('people').drop().catch(() => undefined);
+      const result = await runTool(
+        {
+          connectionId: connection.id,
+          tool: 'mongorestore',
+          database: DATABASE,
+          target: path.join(dumpDir, DATABASE),
+          drop: true
+        },
+        silent
+      );
+      assert.equal(result.ok, true);
+      assert.equal(await db.collection('people').countDocuments(), 3);
+    });
+  } else {
+    console.log('  --  mongodump not installed; skipped the external-tool checks');
+  }
+
+  await check('a missing tool path produces an actionable error', async () => {
+    await assert.rejects(
+      () =>
+        runTool(
+          {
+            connectionId: connection.id,
+            tool: 'mongosh',
+            target: workDir
+          },
+          silent
+        ),
+      (error: Error) => /mongosh/.test(error.message)
+    );
+  });
+
+  // --- secret storage ------------------------------------------------------
+
+  await check('passwords round-trip through the encrypted store', async () => {
+    if (!encryptionAvailable()) {
+      console.log('      (OS encryption unavailable — skipped)');
+      return;
+    }
+    setSecrets(connection.id, { password: 'hunter2' });
+    assert.equal(getSecrets(connection.id).password, 'hunter2');
+    const raw = fs.readFileSync(path.join(app.getPath('userData'), 'secrets.dat'));
+    assert.ok(!raw.toString('utf8').includes('hunter2'), 'the vault must not contain plaintext');
+  });
+
+  await check('deleting a connection clears its secrets', async () => {
+    removeConnection(connection.id);
+    assert.deepEqual(getSecrets(connection.id), {});
+  });
+
+  await db.dropDatabase().catch(() => undefined);
+  await disconnect(connection.id);
+
+  console.log(`\n${passed} passed, ${failed} failed`);
+  fs.rmSync(workDir, { recursive: true, force: true });
+  app.exit(failed === 0 ? 0 : 1);
+}
+
+void app.whenReady().then(() =>
+  main().catch((error) => {
+    console.error('\nSmoke run aborted:', error);
+    app.exit(1);
+  })
+);
+
+// A hung driver call should not leave the harness running forever.
+setTimeout(() => {
+  console.error('\nSmoke run timed out after 180s');
+  app.exit(1);
+}, 180_000).unref();

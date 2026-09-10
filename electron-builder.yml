@@ -1,0 +1,84 @@
+appId: com.mongoexplorer.desktop
+productName: Mongo Explorer
+copyright: Copyright © 2026 Mongo Explorer
+
+directories:
+  output: release
+  buildResources: build
+
+# Only the compiled output and the runtime dependency (the MongoDB driver) ship.
+# React, CodeMirror and the build tooling are dev dependencies bundled by Vite.
+files:
+  - dist/main/**/*
+  - dist/renderer/**/*
+  - package.json
+  - '!**/*.map'
+  - '!**/node_modules/**/{test,__tests__,tests,example,examples,docs,doc}/**'
+  - '!**/node_modules/**/*.{md,markdown,ts,flow}'
+
+# The driver is pure JavaScript here (no optional native extras installed), so
+# it is safe inside the asar archive and needs no rebuild step.
+asar: true
+npmRebuild: false
+
+mac:
+  category: public.app-category.developer-tools
+  icon: build/icon.png
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+    - target: zip
+      arch: [arm64, x64]
+  darkModeSupport: true
+  # Unsigned local builds: without this macOS refuses to open the .app because
+  # the hardened runtime has no signature to validate.
+  hardenedRuntime: false
+  gatekeeperAssess: false
+  extendInfo:
+    NSAppleEventsUsageDescription: Mongo Explorer does not control other applications.
+
+dmg:
+  title: ${productName} ${version}
+  contents:
+    - x: 140
+      y: 200
+      type: file
+    - x: 400
+      y: 200
+      type: link
+      path: /Applications
+
+win:
+  icon: build/icon.png
+  target:
+    - target: nsis
+      arch: [x64, arm64]
+    - target: portable
+      arch: [x64]
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Mongo Explorer
+
+linux:
+  icon: build/icon.png
+  category: Development
+  synopsis: Desktop GUI for MongoDB
+  description: >-
+    Connect to multiple MongoDB deployments, run queries with results in a
+    table, inspect database and collection statistics, and import or export
+    collections as JSON, NDJSON or CSV.
+  desktop:
+    entry:
+      StartupWMClass: mongo-explorer
+  target:
+    - target: AppImage
+      arch: [x64, arm64]
+    - target: deb
+      arch: [x64, arm64]
+    - target: tar.gz
+      arch: [x64, arm64]

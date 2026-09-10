@@ -35,6 +35,7 @@ import { runQuery } from './services/query.js';
 import {
   collectionStats,
   createCollection,
+  createDatabase,
   createIndex,
   databaseStats,
   deleteDocument,
@@ -183,6 +184,13 @@ export function registerIpcHandlers(): void {
     'data:createCollection',
     async (connectionId: string, database: string, collection: string) => {
       await createCollection(connectionId, database, collection);
+      return null;
+    }
+  );
+  handle(
+    'data:createDatabase',
+    async (connectionId: string, database: string, collection: string) => {
+      await createDatabase(connectionId, database, collection);
       return null;
     }
   );

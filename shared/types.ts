@@ -388,6 +388,12 @@ export interface RendererApi {
       database: string,
       collection: string
     ): Promise<Result<null>>;
+    /** Creates `database` by creating its first collection — Mongo has no standalone create. */
+    createDatabase(
+      connectionId: string,
+      database: string,
+      collection: string
+    ): Promise<Result<null>>;
     dropCollection(
       connectionId: string,
       database: string,

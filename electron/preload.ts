@@ -54,6 +54,8 @@ const api: RendererApi = {
       invoke('data:indexes', connectionId, database, collection),
     createCollection: (connectionId: string, database: string, collection: string) =>
       invoke('data:createCollection', connectionId, database, collection),
+    createDatabase: (connectionId: string, database: string, collection: string) =>
+      invoke('data:createDatabase', connectionId, database, collection),
     dropCollection: (connectionId: string, database: string, collection: string) =>
       invoke('data:dropCollection', connectionId, database, collection),
     dropDatabase: (connectionId: string, database: string) =>

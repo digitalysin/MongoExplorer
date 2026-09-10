@@ -16,9 +16,12 @@ import { connect, disconnect, getDb } from '../electron/services/pool.js';
 import { runQuery } from '../electron/services/query.js';
 import {
   collectionStats,
+  createCollection,
+  createDatabase,
   createIndex,
   databaseStats,
   deleteDocument,
+  dropDatabase,
   dropIndex,
   getDocument,
   indexesFor,
@@ -235,6 +238,61 @@ async function main(): Promise<void> {
     assert.ok(stats.objectCount >= 3);
     assert.ok(stats.collections.some((entry) => entry.name === 'people'));
     assert.ok(stats.indexSizeBytes > 0);
+  });
+
+  // --- database and collection creation ------------------------------------
+
+  await check('creating a database materialises it with its first collection', async () => {
+    const name = `${DATABASE}_created`;
+    await createDatabase(connection.id, name, 'events');
+    const databases = await listDatabases(connection.id);
+    assert.ok(
+      databases.some((entry) => entry.name === name),
+      'the new database is not listed'
+    );
+    const collections = await listCollections(connection.id, name);
+    assert.deepEqual(
+      collections.map((entry) => entry.name),
+      ['events']
+    );
+    await dropDatabase(connection.id, name);
+  });
+
+  await check('creating a database that already exists is refused', async () => {
+    await assert.rejects(
+      () => createDatabase(connection.id, DATABASE, 'events'),
+      /already exists/
+    );
+  });
+
+  await check('invalid database and collection names are rejected', async () => {
+    await assert.rejects(() => createDatabase(connection.id, 'has space', 'events'), /cannot contain/);
+    await assert.rejects(() => createDatabase(connection.id, 'has.dot', 'events'), /cannot contain/);
+    await assert.rejects(() => createDatabase(connection.id, '', 'events'), /Enter a database name/);
+    await assert.rejects(
+      () => createDatabase(connection.id, `${DATABASE}_bad`, 'sys$tem'),
+      /cannot contain "\$"/
+    );
+    await assert.rejects(
+      () => createCollection(connection.id, DATABASE, 'system.profiles'),
+      /reserved/
+    );
+    await assert.rejects(
+      () => createDatabase(connection.id, 'd'.repeat(64), 'events'),
+      /63 bytes or fewer/
+    );
+    const databases = await listDatabases(connection.id);
+    assert.ok(
+      !databases.some((entry) => entry.name.startsWith(`${DATABASE}_bad`)),
+      'a rejected name still created a database'
+    );
+  });
+
+  await check('a collection can be added to an existing database', async () => {
+    await createCollection(connection.id, DATABASE, 'audit_log');
+    const collections = await listCollections(connection.id, DATABASE);
+    assert.ok(collections.some((entry) => entry.name === 'audit_log'));
+    await db.collection('audit_log').drop();
   });
 
   await check('index listing reports keys and usage', async () => {

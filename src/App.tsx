@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { ConnectionConfig } from '../shared/types';
 import { ConnectionDialog } from './components/ConnectionDialog';
+import { CreateDialog, type CreateTarget } from './components/CreateDialog';
 import { ExportDialog } from './components/ExportDialog';
 import { ImportDialog } from './components/ImportDialog';
 import { QueryWorkspace, type QueryTabState } from './components/QueryWorkspace';
@@ -42,6 +43,7 @@ export default function App() {
     collection?: string;
   } | null>(null);
   const [confirm, setConfirm] = useState<ConfirmState | null>(null);
+  const [createTarget, setCreateTarget] = useState<CreateTarget | null>(null);
 
   const activeTab = useMemo(
     () => tabs.find((tab) => tab.id === activeTabId) ?? null,
@@ -139,22 +141,42 @@ export default function App() {
     });
   };
 
-  const createCollection = (connectionId: string, database: string) => {
-    const name = window.prompt(`New collection in ${database}`);
-    if (!name?.trim()) return;
-    void (async () => {
+  const dropDatabase = (connectionId: string, database: string) => {
+    const perform = async () => {
       try {
-        await unwrap(api.data.createCollection(connectionId, database, name.trim()));
-        await store.loadCollections(connectionId, database, true);
-        store.pushToast({ kind: 'success', message: `Created ${database}.${name.trim()}` });
+        await unwrap(api.data.dropDatabase(connectionId, database));
+        setTabs((current) =>
+          current.filter((tab) => !(tab.connectionId === connectionId && tab.database === database))
+        );
+        await store.loadDatabases(connectionId, true);
+        store.select({ connectionId, database: null, collection: null });
+        store.pushToast({ kind: 'success', message: `Dropped ${database}` });
       } catch (error) {
         store.pushToast({
           kind: 'error',
-          message: 'Could not create the collection',
+          message: 'Could not drop the database',
           detail: errorMessage(error)
         });
       }
-    })();
+    };
+    if (store.settings?.confirmDestructiveOps === false) {
+      void perform();
+      return;
+    }
+    setConfirm({
+      title: 'Drop database',
+      message: `${database} and every collection inside it will be deleted. This cannot be undone.`,
+      confirmLabel: 'Drop database',
+      onConfirm: perform
+    });
+  };
+
+  const onCreated = async (connectionId: string, database: string, collection: string) => {
+    setCreateTarget(null);
+    await store.loadDatabases(connectionId, true);
+    await store.loadCollections(connectionId, database, true);
+    store.select({ connectionId, database, collection });
+    store.pushToast({ kind: 'success', message: `Created ${database}.${collection}` });
   };
 
   const deleteConnection = (config: ConnectionConfig) => {
@@ -251,7 +273,11 @@ export default function App() {
           setImportTarget({ connectionId, database, collection })
         }
         onDropCollection={dropCollection}
-        onCreateCollection={createCollection}
+        onCreateDatabase={(connectionId) => setCreateTarget({ kind: 'database', connectionId })}
+        onCreateCollection={(connectionId, database) =>
+          setCreateTarget({ kind: 'collection', connectionId, database })
+        }
+        onDropDatabase={dropDatabase}
       />
 
       <main className="main">
@@ -373,6 +399,16 @@ export default function App() {
       ) : null}
 
       {settingsOpen ? <SettingsDialog onClose={() => setSettingsOpen(false)} /> : null}
+
+      {createTarget ? (
+        <CreateDialog
+          target={createTarget}
+          onClose={() => setCreateTarget(null)}
+          onCreated={(database, collection) =>
+            void onCreated(createTarget.connectionId, database, collection)
+          }
+        />
+      ) : null}
 
       {exportTarget ? (
         <ExportDialog

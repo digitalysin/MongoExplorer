@@ -48,6 +48,10 @@ Tools** (or let it auto-detect them from your `PATH`).
 - Insert new documents into the current collection and delete existing ones.
 - Create indexes with keys, name, uniqueness, sparseness, TTL, a partial filter
   expression and a collation; drop any index except `_id_`.
+- Create a database from the connection row, or a collection from the database
+  row. MongoDB has no standalone create-database command — a database begins to
+  exist once it holds a collection — so the dialog asks for both names at once.
+  Drop a database or a collection from the same rows, behind a confirmation.
 
 **Statistics**
 

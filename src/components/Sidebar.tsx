@@ -12,7 +12,9 @@ interface SidebarProps {
   onExport: (connectionId: string, database: string, collection: string) => void;
   onImport: (connectionId: string, database: string, collection?: string) => void;
   onDropCollection: (connectionId: string, database: string, collection: string) => void;
+  onCreateDatabase: (connectionId: string) => void;
   onCreateCollection: (connectionId: string, database: string) => void;
+  onDropDatabase: (connectionId: string, database: string) => void;
 }
 
 export function Sidebar(props: SidebarProps) {
@@ -102,13 +104,22 @@ export function Sidebar(props: SidebarProps) {
                 </span>
                 <span className="row-actions" onClick={(event) => event.stopPropagation()}>
                   {connected ? (
-                    <button
-                      className="icon-button"
-                      title="Disconnect"
-                      onClick={() => void store.disconnect(config.id)}
-                    >
-                      ⏻
-                    </button>
+                    <>
+                      <button
+                        className="icon-button"
+                        title="New database"
+                        onClick={() => props.onCreateDatabase(config.id)}
+                      >
+                        ＋
+                      </button>
+                      <button
+                        className="icon-button"
+                        title="Disconnect"
+                        onClick={() => void store.disconnect(config.id)}
+                      >
+                        ⏻
+                      </button>
+                    </>
                   ) : null}
                   <button
                     className="icon-button"
@@ -183,6 +194,16 @@ export function Sidebar(props: SidebarProps) {
                                 }}
                               >
                                 ⇤
+                              </span>
+                              <span
+                                className="icon-button"
+                                title="Drop database"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  props.onDropDatabase(config.id, database.name);
+                                }}
+                              >
+                                🗑
                               </span>
                             </span>
                           </button>

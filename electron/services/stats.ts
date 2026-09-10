@@ -225,11 +225,57 @@ export async function indexesFor(
   return readIndexes(getDb(connectionId, database), collection);
 }
 
+// Mongo rejects these server-side too, but the driver errors are cryptic — check up front so the
+// dialog can point at the offending character.
+const DATABASE_NAME_FORBIDDEN = /[/\\. "$*<>:|?\0]/;
+
+function assertDatabaseName(database: string): void {
+  if (!database) throw new Error('Enter a database name.');
+  const forbidden = database.match(DATABASE_NAME_FORBIDDEN);
+  if (forbidden) {
+    throw new Error(
+      `A database name cannot contain ${JSON.stringify(forbidden[0])}. Avoid / \\ . " $ * < > : | ? and spaces.`
+    );
+  }
+  if (Buffer.byteLength(database, 'utf8') > 63) {
+    throw new Error('A database name must be 63 bytes or fewer.');
+  }
+}
+
+function assertCollectionName(collection: string): void {
+  if (!collection) throw new Error('Enter a collection name.');
+  if (collection.includes('$')) throw new Error('A collection name cannot contain "$".');
+  if (collection.includes('\0')) throw new Error('A collection name cannot contain a null byte.');
+  if (collection.startsWith('system.')) {
+    throw new Error('Collection names starting with "system." are reserved for MongoDB.');
+  }
+}
+
 export async function createCollection(
   connectionId: string,
   database: string,
   collection: string
 ): Promise<void> {
+  assertDatabaseName(database);
+  assertCollectionName(collection);
+  await getDb(connectionId, database).createCollection(collection);
+}
+
+/**
+ * MongoDB has no "create database" command: a database starts existing once it holds something.
+ * Creating the first collection is what materialises it, so the two are one operation here.
+ */
+export async function createDatabase(
+  connectionId: string,
+  database: string,
+  collection: string
+): Promise<void> {
+  assertDatabaseName(database);
+  assertCollectionName(collection);
+  const existing = await listDatabases(connectionId);
+  if (existing.some((entry) => entry.name === database)) {
+    throw new Error(`The database "${database}" already exists.`);
+  }
   await getDb(connectionId, database).createCollection(collection);
 }
 

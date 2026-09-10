@@ -7,7 +7,7 @@
     "name": "Mongo Explorer",
     "email": "noreply@mongo-explorer.local"
   },
-  "homepage": "https://github.com/mongo-explorer/mongo-explorer",
+  "homepage": "https://github.com/digitalysin/MongoExplorer",
   "license": "MIT",
   "private": true,
   "main": "dist/main/main.js",

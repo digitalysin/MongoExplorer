@@ -1,0 +1,119 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Two pushes in quick succession must not bump the version while a build is
+# already packaging the previous one.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    name: Typecheck and smoke test
+    runs-on: ubuntu-latest
+    services:
+      mongodb:
+        image: mongo:8
+        ports: ['27099:27017']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      # Electron refuses to start unless its SUID sandbox helper is owned by
+      # root, which npm cannot do when it unpacks the binary.
+      - name: Grant Electron's sandbox helper its permissions
+        run: |
+          sudo chown root:root node_modules/electron/dist/chrome-sandbox
+          sudo chmod 4755 node_modules/electron/dist/chrome-sandbox
+      # Electron also needs a virtual display on a headless runner.
+      - name: Smoke test
+        run: xvfb-run --auto-servernum npm run smoke
+
+  version:
+    name: Bump version
+    needs: verify
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.bump.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Bump the patch version, commit and tag
+        id: bump
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          npm version patch --no-git-tag-version
+          version=$(node -p "require('./package.json').version")
+          tag="v$version"
+          # Pushing with GITHUB_TOKEN does not start another run; [skip ci] makes
+          # that explicit for anyone reading the history.
+          git commit -am "chore: release $tag [skip ci]"
+          git tag "$tag"
+          git push origin HEAD:main --follow-tags
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  package:
+    name: Package ${{ matrix.os }}
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.tag }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Build installers and upload them to the draft release
+        run: npx electron-builder --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # There is no signing certificate, so do not let electron-builder hunt
+          # for one and fail the macOS build.
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+  publish:
+    name: Publish release
+    needs: [version, package]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.version.outputs.tag }}
+      - name: Write the notes and publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          previous=$(git describe --tags --abbrev=0 "$TAG^" 2>/dev/null || true)
+          if [ -n "$previous" ]; then
+            notes=$(git log --pretty='- %s' "$previous..$TAG" --no-merges)
+            notes="## Changes since $previous"$'\n\n'"$notes"
+          else
+            notes="First release."
+          fi
+          gh release edit "$TAG" --draft=false --latest --notes "$notes"

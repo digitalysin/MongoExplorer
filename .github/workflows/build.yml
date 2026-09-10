@@ -1,9 +1,8 @@
 name: Build
 
+# Pushes to main are handled by release.yml, which verifies, versions and
+# publishes. This workflow keeps pull requests honest without releasing.
 on:
-  push:
-    branches: [main]
-    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -24,7 +23,13 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build
-      # Electron needs a virtual display and a keyring on headless Linux.
+      # Electron refuses to start unless its SUID sandbox helper is owned by
+      # root, which npm cannot do when it unpacks the binary.
+      - name: Grant Electron's sandbox helper its permissions
+        run: |
+          sudo chown root:root node_modules/electron/dist/chrome-sandbox
+          sudo chmod 4755 node_modules/electron/dist/chrome-sandbox
+      # Electron also needs a virtual display on a headless runner.
       - name: Smoke test
         run: xvfb-run --auto-servernum npm run smoke
 

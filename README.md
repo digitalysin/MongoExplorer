@@ -102,9 +102,28 @@ npm run dist:win    # NSIS installer + portable .exe
 npm run dist:linux  # AppImage + .deb + .tar.gz
 ```
 
-Installers land in `release/`. Each platform must be built on its own OS (or in
-CI); the included GitHub Actions workflow in `.github/workflows/build.yml` builds
-all three on every push and uploads the installers as artifacts.
+Installers land in `release/`. Each platform must be built on its own OS, or in
+CI: `.github/workflows/build.yml` builds all three on every pull request and
+uploads the installers as artifacts.
+
+## Releases
+
+Every push to `main` publishes a GitHub Release, via
+`.github/workflows/release.yml`:
+
+1. **verify** — typecheck, build and the smoke suite against a real MongoDB.
+2. **version** — bumps the patch version, commits it back to `main` as
+   `chore: release vX.Y.Z [skip ci]` and pushes the tag. Nothing is released if
+   verification failed.
+3. **package** — macOS, Linux and Windows build in parallel from that tag and
+   upload their installers into a single draft release.
+4. **publish** — flips the draft to the latest release, with notes listing every
+   commit since the previous tag.
+
+The bump is pushed with `GITHUB_TOKEN`, which by design does not trigger another
+run, so releases cannot loop. For a MINOR or MAJOR release, bump the version
+yourself (`npm version minor --no-git-tag-version`) and push; the next patch bump
+continues from there.
 
 macOS builds are unsigned by default. To sign and notarise, set
 `CSC_LINK`/`CSC_KEY_PASSWORD` and the notarisation credentials before running

@@ -6,6 +6,14 @@ directories:
   output: release
   buildResources: build
 
+# CI uploads every platform's installers into one draft release, which the
+# workflow publishes once all three have finished.
+publish:
+  provider: github
+  owner: digitalysin
+  repo: MongoExplorer
+  releaseType: draft
+
 # Only the compiled output and the runtime dependency (the MongoDB driver) ship.
 # React, CodeMirror and the build tooling are dev dependencies bundled by Vite.
 files:

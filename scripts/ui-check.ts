@@ -148,17 +148,40 @@ async function main(): Promise<void> {
   await wait(2500);
   await shoot(window, '06-statistics');
 
+  console.log('  opening the create-index dialog…');
+  await click(window, '.stats-section .btn', 'Create index');
+  await wait(600);
+  await shoot(window, '07-create-index');
+  await click(window, '.modal-footer .btn', 'Cancel');
+  await wait(300);
+
+  console.log('  back to the query tab, editing a document…');
+  await click(window, '.tabs .tab');
+  await wait(500);
+  await click(window, '.cell-index');
+  await wait(1200);
+  await shoot(window, '08-document-editor');
+  await click(window, '.modal-footer .btn', 'Close');
+  await wait(300);
+
+  console.log('  opening the query library…');
+  await click(window, '.toolbar .btn', 'History');
+  await wait(900);
+  await shoot(window, '09-query-library');
+  await click(window, '.modal-footer .btn', 'Close');
+  await wait(300);
+
   console.log('  opening the export dialog…');
   await click(window, '.titlebar-actions .btn', 'Export');
   await wait(600);
-  await shoot(window, '07-export');
+  await shoot(window, '10-export');
   await click(window, '.modal-footer .btn', 'Close');
   await wait(300);
 
   console.log('  opening settings…');
   await click(window, '.titlebar-actions .btn', 'Settings');
   await wait(1500);
-  await shoot(window, '08-settings');
+  await shoot(window, '11-settings');
 
   const client = new MongoClient(`mongodb://${HOST}`);
   await client.connect();

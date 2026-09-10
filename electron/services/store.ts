@@ -53,6 +53,15 @@ function writeJsonFile(file: string, value: unknown): void {
   fs.renameSync(tmp, target);
 }
 
+/** Generic access for the other stores (query history, saved queries). */
+export function readStoreFile<T>(file: string, fallback: T): T {
+  return readJsonFile(file, fallback);
+}
+
+export function writeStoreFile(file: string, value: unknown): void {
+  writeJsonFile(file, value);
+}
+
 export function loadConnections(): ConnectionConfig[] {
   const list = readJsonFile<ConnectionConfig[]>(CONNECTIONS_FILE, []);
   return Array.isArray(list) ? list : [];

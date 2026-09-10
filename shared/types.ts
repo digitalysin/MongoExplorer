@@ -169,6 +169,54 @@ export interface QueryRequest {
   explain?: 'queryPlanner' | 'executionStats' | 'allPlansExecution' | null;
 }
 
+export interface CreateIndexRequest {
+  connectionId: string;
+  database: string;
+  collection: string;
+  /** Index keys as a JS/EJSON expression, e.g. `{ status: 1, createdAt: -1 }`. */
+  keys: string;
+  name?: string;
+  unique?: boolean;
+  sparse?: boolean;
+  /** TTL in seconds; only valid on a single-field date index. */
+  expireAfterSeconds?: number | null;
+  /** Partial filter expression, e.g. `{ archived: false }`. */
+  partialFilter?: string;
+  collation?: string;
+}
+
+export interface DocumentRef {
+  connectionId: string;
+  database: string;
+  collection: string;
+  /** Canonical EJSON of the document's `_id`. */
+  idJson: string;
+}
+
+export interface QueryHistoryEntry {
+  id: string;
+  connectionId: string;
+  connectionName: string;
+  database: string;
+  code: string;
+  at: string;
+  durationMs: number;
+  ok: boolean;
+  totalReturned: number;
+  error?: string;
+}
+
+export interface SavedQuery {
+  id: string;
+  name: string;
+  code: string;
+  database: string;
+  connectionId?: string;
+  description?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export type ExportFormat = 'json-array' | 'ndjson' | 'csv';
 export type ImportFormat = 'json-array' | 'ndjson' | 'csv' | 'auto';
 
@@ -346,9 +394,35 @@ export interface RendererApi {
       collection: string
     ): Promise<Result<null>>;
     dropDatabase(connectionId: string, database: string): Promise<Result<null>>;
+    createIndex(request: CreateIndexRequest): Promise<Result<{ name: string }>>;
+    dropIndex(
+      connectionId: string,
+      database: string,
+      collection: string,
+      indexName: string
+    ): Promise<Result<null>>;
+    /** Canonical EJSON of one document, for lossless editing. */
+    getDocument(ref: DocumentRef): Promise<Result<string>>;
+    replaceDocument(ref: DocumentRef, documentJson: string): Promise<Result<null>>;
+    insertDocument(
+      connectionId: string,
+      database: string,
+      collection: string,
+      documentJson: string
+    ): Promise<Result<{ insertedId: unknown }>>;
+    deleteDocument(ref: DocumentRef): Promise<Result<null>>;
   };
   query: {
     run(request: QueryRequest): Promise<Result<QueryResult>>;
+  };
+  library: {
+    history(limit?: number): Promise<Result<QueryHistoryEntry[]>>;
+    clearHistory(): Promise<Result<null>>;
+    savedQueries(): Promise<Result<SavedQuery[]>>;
+    saveQuery(
+      query: Partial<SavedQuery> & { name: string; code: string }
+    ): Promise<Result<SavedQuery>>;
+    removeSavedQuery(id: string): Promise<Result<null>>;
   };
   transfer: {
     exportCollection(request: ExportRequest): Promise<Result<TransferResult>>;

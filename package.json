@@ -16,13 +16,13 @@
     "build:renderer": "vite build",
     "build:main": "node scripts/build-main.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json",
-    "smoke": "node scripts/build-smoke.mjs && electron dist/smoke/smoke.js",
+    "smoke": "node scripts/build-smoke.mjs && node scripts/with-mongod.mjs electron dist/smoke/smoke.js",
     "pack": "npm run build && electron-builder --dir",
     "dist": "npm run build && electron-builder -mwl",
     "dist:mac": "npm run build && electron-builder --mac",
     "dist:win": "npm run build && electron-builder --win",
     "dist:linux": "npm run build && electron-builder --linux",
-    "ui-check": "npm run build && node scripts/build-ui-check.mjs && electron dist/smoke/ui-check.js",
+    "ui-check": "npm run build && node scripts/build-ui-check.mjs && node scripts/with-mongod.mjs electron dist/smoke/ui-check.js",
     "icon": "electron scripts/make-icon.mjs"
   },
   "dependencies": {

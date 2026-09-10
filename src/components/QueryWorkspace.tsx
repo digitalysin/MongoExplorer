@@ -3,7 +3,9 @@ import type { QueryResult } from '../../shared/types';
 import { api, errorMessage, unwrap } from '../lib/api';
 import { formatDuration, formatNumber } from '../lib/format';
 import { useStore } from '../state/store';
+import { DocumentEditor, type DocumentEditorTarget } from './DocumentEditor';
 import { QueryEditor } from './QueryEditor';
+import { QueryLibrary, SaveQueryDialog } from './QueryLibrary';
 import { ResultView, type ResultMode } from './ResultView';
 import { Badge, Button, EmptyState, Select, Spinner } from './ui';
 
@@ -31,6 +33,9 @@ export function QueryWorkspace({
   const store = useStore();
   const [mode, setMode] = useState<ResultMode>('table');
   const [editorHeight, setEditorHeight] = useState(180);
+  const [libraryOpen, setLibraryOpen] = useState(false);
+  const [saveOpen, setSaveOpen] = useState(false);
+  const [editing, setEditing] = useState<DocumentEditorTarget | null>(null);
   const dragState = useRef<{ startY: number; startHeight: number } | null>(null);
   const databases = store.databases[tab.connectionId] ?? [];
 
@@ -116,6 +121,28 @@ export function QueryWorkspace({
 
         <span className="spacer" />
 
+        {tab.collection ? (
+          <Button
+            size="sm"
+            title={`Insert a document into ${tab.collection}`}
+            onClick={() =>
+              setEditing({
+                connectionId: tab.connectionId,
+                database: tab.database,
+                collection: tab.collection as string
+              })
+            }
+          >
+            + Document
+          </Button>
+        ) : null}
+        <Button size="sm" onClick={() => setSaveOpen(true)}>
+          Save query
+        </Button>
+        <Button size="sm" onClick={() => setLibraryOpen(true)}>
+          History
+        </Button>
+
         <div className="segmented">
           <button
             type="button"
@@ -178,7 +205,23 @@ export function QueryWorkspace({
 
         <div className="result-body">
           {tab.error ? <div className="error-box">{tab.error}</div> : null}
-          {!tab.error && tab.result ? <ResultView result={tab.result} mode={mode} /> : null}
+          {!tab.error && tab.result ? (
+            <ResultView
+              result={tab.result}
+              mode={mode}
+              onEditDocument={
+                tab.result.collection
+                  ? (idJson) =>
+                      setEditing({
+                        connectionId: tab.connectionId,
+                        database: tab.result?.database ?? tab.database,
+                        collection: tab.result?.collection as string,
+                        idJson
+                      })
+                  : undefined
+              }
+            />
+          ) : null}
           {!tab.error && !tab.result ? (
             <EmptyState
               title="Nothing has run yet"
@@ -194,6 +237,36 @@ export function QueryWorkspace({
           ) : null}
         </div>
       </div>
+
+      {libraryOpen ? (
+        <QueryLibrary
+          onClose={() => setLibraryOpen(false)}
+          onOpen={(code, database) => {
+            onPatch({ code, ...(database ? { database } : {}) });
+            setLibraryOpen(false);
+          }}
+        />
+      ) : null}
+
+      {saveOpen ? (
+        <SaveQueryDialog
+          code={tab.code}
+          database={tab.database}
+          connectionId={tab.connectionId}
+          onClose={() => setSaveOpen(false)}
+          onSaved={(query) =>
+            store.pushToast({ kind: 'success', message: `Saved “${query.name}”` })
+          }
+        />
+      ) : null}
+
+      {editing ? (
+        <DocumentEditor
+          target={editing}
+          onClose={() => setEditing(null)}
+          onChanged={() => void run()}
+        />
+      ) : null}
     </div>
   );
 }

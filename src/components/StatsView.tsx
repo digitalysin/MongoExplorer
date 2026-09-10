@@ -7,6 +7,7 @@ import {
   formatNumber,
   formatUptime
 } from '../lib/format';
+import { IndexDialog } from './IndexDialog';
 import { Badge, Button, Spinner, StatTile } from './ui';
 
 export interface StatsTabState {
@@ -24,6 +25,8 @@ export function StatsView({ tab }: { tab: StatsTabState }) {
   const [collection, setCollection] = useState<CollectionStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [creatingIndex, setCreatingIndex] = useState(false);
+  const [droppingIndex, setDroppingIndex] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -51,6 +54,22 @@ export function StatsView({ tab }: { tab: StatsTabState }) {
   useEffect(() => {
     void load();
   }, [load]);
+
+  const dropIndexNamed = (name: string) => setDroppingIndex(name);
+
+  const confirmDropIndex = async () => {
+    if (!droppingIndex || !tab.database || !tab.collection) return;
+    try {
+      await unwrap(
+        api.data.dropIndex(tab.connectionId, tab.database, tab.collection, droppingIndex)
+      );
+      setDroppingIndex(null);
+      await load();
+    } catch (caught) {
+      setError(errorMessage(caught));
+      setDroppingIndex(null);
+    }
+  };
 
   if (loading && !server) {
     return (
@@ -110,7 +129,12 @@ export function StatsView({ tab }: { tab: StatsTabState }) {
           </section>
 
           <section className="stats-section">
-            <h3>Indexes</h3>
+            <div className="row" style={{ justifyContent: 'space-between' }}>
+              <h3 style={{ margin: '0 0 10px' }}>Indexes</h3>
+              <Button size="sm" onClick={() => setCreatingIndex(true)}>
+                + Create index
+              </Button>
+            </div>
             <table className="plain-table">
               <thead>
                 <tr>
@@ -119,6 +143,7 @@ export function StatsView({ tab }: { tab: StatsTabState }) {
                   <th>Properties</th>
                   <th className="numeric">Size</th>
                   <th className="numeric">Uses</th>
+                  <th style={{ width: 40 }} />
                 </tr>
               </thead>
               <tbody>
@@ -137,10 +162,33 @@ export function StatsView({ tab }: { tab: StatsTabState }) {
                     </td>
                     <td className="numeric">{formatBytes(index.sizeBytes)}</td>
                     <td className="numeric">{formatNumber(index.usageCount)}</td>
+                    <td>
+                      {index.name === '_id_' ? null : (
+                        <button
+                          className="icon-button"
+                          title="Drop this index"
+                          onClick={() => void dropIndexNamed(index.name)}
+                        >
+                          🗑
+                        </button>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
             </table>
+            {droppingIndex ? (
+              <p className="dim" style={{ marginTop: 8 }}>
+                Drop the index <span className="inline-code">{droppingIndex}</span>? Queries that
+                rely on it will fall back to a collection scan.{' '}
+                <Button size="sm" variant="danger" onClick={() => void confirmDropIndex()}>
+                  Drop it
+                </Button>{' '}
+                <Button size="sm" onClick={() => setDroppingIndex(null)}>
+                  Cancel
+                </Button>
+              </p>
+            ) : null}
           </section>
 
           <section className="stats-section">
@@ -256,6 +304,16 @@ export function StatsView({ tab }: { tab: StatsTabState }) {
             <StatTile label="Max BSON size" value={formatBytes(server.maxBsonObjectSize)} />
           </div>
         </section>
+      ) : null}
+
+      {creatingIndex && tab.database && tab.collection ? (
+        <IndexDialog
+          connectionId={tab.connectionId}
+          database={tab.database}
+          collection={tab.collection}
+          onClose={() => setCreatingIndex(false)}
+          onCreated={() => void load()}
+        />
       ) : null}
     </div>
   );

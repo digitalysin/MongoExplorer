@@ -16,11 +16,25 @@ import { connect, disconnect, getDb } from '../electron/services/pool.js';
 import { runQuery } from '../electron/services/query.js';
 import {
   collectionStats,
+  createIndex,
   databaseStats,
+  deleteDocument,
+  dropIndex,
+  getDocument,
   indexesFor,
+  insertDocument,
   listCollections,
-  listDatabases
+  listDatabases,
+  replaceDocument
 } from '../electron/services/stats.js';
+import {
+  clearHistory,
+  listHistory,
+  listSavedQueries,
+  recordHistory,
+  removeSavedQuery,
+  saveQuery
+} from '../electron/services/library.js';
 import { exportCollection, importCollection } from '../electron/services/transfer.js';
 import { detectTools, runTool } from '../electron/services/tools.js';
 import { encryptionAvailable, getSecrets, setSecrets } from '../electron/services/store.js';
@@ -229,6 +243,215 @@ async function main(): Promise<void> {
     assert.ok(unique);
     assert.deepEqual(unique!.keys, { name: 1 });
     assert.equal(unique!.unique, true);
+  });
+
+  // --- index management ----------------------------------------------------
+
+  await check('createIndex accepts shell-style keys and options', async () => {
+    const created = await createIndex({
+      connectionId: connection.id,
+      database: DATABASE,
+      collection: 'people',
+      keys: '{ age: -1, name: 1 }',
+      name: 'age_name',
+      sparse: true
+    });
+    assert.equal(created.name, 'age_name');
+    const indexes = await indexesFor(connection.id, DATABASE, 'people');
+    const index = indexes.find((entry) => entry.name === 'age_name');
+    assert.ok(index);
+    assert.deepEqual(index!.keys, { age: -1, name: 1 });
+    assert.equal(index!.sparse, true);
+  });
+
+  await check('createIndex supports partial filters and TTL', async () => {
+    const partial = await createIndex({
+      connectionId: connection.id,
+      database: DATABASE,
+      collection: 'people',
+      keys: '{ "address.city": 1 }',
+      partialFilter: '{ age: { $gt: 30 } }'
+    });
+    assert.equal(partial.name, 'address.city_1');
+
+    await createIndex({
+      connectionId: connection.id,
+      database: DATABASE,
+      collection: 'people',
+      keys: '{ joined: 1 }',
+      name: 'joined_ttl',
+      expireAfterSeconds: 86_400
+    });
+    const indexes = await indexesFor(connection.id, DATABASE, 'people');
+    assert.equal(indexes.find((entry) => entry.name === 'joined_ttl')?.ttlSeconds, 86_400);
+  });
+
+  await check('dropIndex removes an index but refuses to touch _id', async () => {
+    await dropIndex(connection.id, DATABASE, 'people', 'age_name');
+    const indexes = await indexesFor(connection.id, DATABASE, 'people');
+    assert.ok(!indexes.some((entry) => entry.name === 'age_name'));
+    await assert.rejects(
+      () => dropIndex(connection.id, DATABASE, 'people', '_id_'),
+      /_id index cannot be dropped/
+    );
+  });
+
+  await check('an empty index key specification is rejected', async () => {
+    await assert.rejects(
+      () =>
+        createIndex({
+          connectionId: connection.id,
+          database: DATABASE,
+          collection: 'people',
+          keys: '{}'
+        }),
+      /at least one index key/
+    );
+  });
+
+  // --- document editing ----------------------------------------------------
+
+  await check('a document reads back as canonical EJSON', async () => {
+    const found = await db.collection('people').findOne({ name: 'Ada' });
+    const idJson = JSON.stringify({ $oid: String(found!._id) });
+    const json = await getDocument({
+      connectionId: connection.id,
+      database: DATABASE,
+      collection: 'people',
+      idJson
+    });
+    const parsed = JSON.parse(json);
+    assert.equal(parsed._id.$oid, String(found!._id));
+    assert.ok(parsed.age.$numberInt || parsed.age.$numberLong || parsed.age.$numberDouble);
+    assert.ok(parsed.joined.$date, 'dates should stay typed in canonical EJSON');
+  });
+
+  await check('editing a document preserves its BSON types', async () => {
+    const found = await db.collection('people').findOne({ name: 'Grace' });
+    const ref = {
+      connectionId: connection.id,
+      database: DATABASE,
+      collection: 'people',
+      idJson: JSON.stringify({ $oid: String(found!._id) })
+    };
+    const json = JSON.parse(await getDocument(ref));
+    json.title = 'Rear Admiral';
+    json.age = { $numberLong: '46' };
+    await replaceDocument(ref, JSON.stringify(json));
+
+    const updated = await db.collection('people').findOne({ _id: found!._id });
+    assert.equal(updated?.title, 'Rear Admiral');
+    assert.equal(String(updated?.age), '46');
+    assert.ok(updated?.joined instanceof Date, 'the untouched date must stay a date');
+  });
+
+  await check('changing _id during an edit is refused', async () => {
+    const found = await db.collection('people').findOne({ name: 'Ada' });
+    const ref = {
+      connectionId: connection.id,
+      database: DATABASE,
+      collection: 'people',
+      idJson: JSON.stringify({ $oid: String(found!._id) })
+    };
+    await assert.rejects(
+      () => replaceDocument(ref, JSON.stringify({ _id: { $oid: '0'.repeat(24) }, name: 'Ada' })),
+      /_id of an existing document cannot be changed/
+    );
+  });
+
+  await check('documents can be inserted and deleted', async () => {
+    const inserted = await insertDocument(
+      connection.id,
+      DATABASE,
+      'people',
+      '{ "name": "Barbara", "age": { "$numberInt": "70" } }'
+    );
+    assert.ok(inserted.insertedId);
+    const created = await db.collection('people').findOne({ name: 'Barbara' });
+    assert.equal(created?.age, 70);
+
+    const ref = {
+      connectionId: connection.id,
+      database: DATABASE,
+      collection: 'people',
+      idJson: JSON.stringify({ $oid: String(created!._id) })
+    };
+    await deleteDocument(ref);
+    assert.equal(await db.collection('people').countDocuments({ name: 'Barbara' }), 0);
+    await assert.rejects(() => deleteDocument(ref), /no longer exists/);
+  });
+
+  await check('malformed document JSON produces a readable error', async () => {
+    await assert.rejects(
+      () => insertDocument(connection.id, DATABASE, 'people', '{ not json'),
+      /Invalid document/
+    );
+  });
+
+  // --- query history and saved queries -------------------------------------
+
+  await check('history is recorded and repeated runs collapse', async () => {
+    clearHistory();
+    recordHistory({
+      connectionId: connection.id,
+      connectionName: 'Smoke test',
+      database: DATABASE,
+      code: 'db.people.find({})',
+      durationMs: 5,
+      ok: true,
+      totalReturned: 3
+    });
+    recordHistory({
+      connectionId: connection.id,
+      connectionName: 'Smoke test',
+      database: DATABASE,
+      code: 'db.people.find({})',
+      durationMs: 7,
+      ok: true,
+      totalReturned: 3
+    });
+    recordHistory({
+      connectionId: connection.id,
+      connectionName: 'Smoke test',
+      database: DATABASE,
+      code: 'db.people.countDocuments({})',
+      durationMs: 2,
+      ok: false,
+      totalReturned: 0,
+      error: 'boom'
+    });
+
+    const history = listHistory(10);
+    assert.equal(history.length, 2, 'the repeated run should have collapsed');
+    assert.equal(history[0].code, 'db.people.countDocuments({})');
+    assert.equal(history[0].ok, false);
+    assert.equal(history[0].error, 'boom');
+    assert.equal(history[1].durationMs, 7, 'the newer timing should win');
+  });
+
+  await check('saved queries can be created, updated and removed', async () => {
+    const saved = saveQuery({
+      name: 'Recent joiners',
+      code: 'db.people.find({}).sort({ joined: -1 })',
+      database: DATABASE,
+      connectionId: connection.id
+    });
+    assert.ok(saved.id);
+    assert.equal(listSavedQueries().length, 1);
+
+    const updated = saveQuery({ ...saved, name: 'Recent joiners v2' });
+    assert.equal(updated.id, saved.id);
+    assert.equal(updated.createdAt, saved.createdAt);
+    assert.equal(listSavedQueries().length, 1, 'updating must not create a duplicate');
+    assert.equal(listSavedQueries()[0].name, 'Recent joiners v2');
+
+    removeSavedQuery(saved.id);
+    assert.equal(listSavedQueries().length, 0);
+
+    await assert.rejects(
+      async () => saveQuery({ name: '  ', code: 'db.people.find({})' }),
+      /Give the query a name/
+    );
   });
 
   // --- export / import (native) --------------------------------------------

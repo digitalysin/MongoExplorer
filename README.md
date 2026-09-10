@@ -34,6 +34,20 @@ Tools** (or let it auto-detect them from your `PATH`).
 - Results as a typed table (double-click a cell or row to inspect the document)
   or as raw extended JSON, plus `Explain` for the execution plan.
 - Row limit per tab, with a clear badge when the result was truncated.
+- Every run is recorded in a searchable history (consecutive identical runs
+  collapse into one), and any query can be saved under a name and reopened
+  later from the same library.
+
+**Editing**
+
+![Document editor](docs/screenshot-document-editor.png)
+
+- Edit a document straight from the result table: click the row number to open
+  it in canonical extended JSON, so an edit round-trip cannot turn an `int64`
+  into a double. Changing `_id` is refused rather than silently ignored.
+- Insert new documents into the current collection and delete existing ones.
+- Create indexes with keys, name, uniqueness, sparseness, TTL, a partial filter
+  expression and a collation; drop any index except `_id_`.
 
 **Statistics**
 
@@ -100,18 +114,17 @@ npm run smoke       # end-to-end services test against a real mongod
 npm run ui-check    # boots the real UI, clicks through it, writes screenshots
 ```
 
-Both `smoke` and `ui-check` expect a throwaway server on port 27099:
+Both harnesses start a throwaway `mongod` on port 27099 and shut it down
+afterwards; if something is already listening there they reuse it instead. Set
+`MONGO_TEST_PORT` to move it, or start your own server beforehand if `mongod` is
+not on your `PATH`.
 
-```bash
-mkdir -p /tmp/mongoexp-test/db
-mongod --dbpath /tmp/mongoexp-test/db --port 27099
-```
-
-The smoke test covers query execution and serialization, cursor limits, shell
-helpers, statistics, every import/export format, CSV quoting edge cases,
-duplicate-key handling, the external-tool integration and secret storage.
-`ui-check` writes screenshots to `artifacts/` and fails on any renderer console
-error.
+The smoke test's 47 checks cover query execution and serialization, cursor
+limits, shell helpers, statistics, index creation and dropping, document
+editing with BSON-type preservation, query history and saved queries, every
+import/export format, CSV quoting edge cases, duplicate-key handling, the
+external-tool integration and secret storage. `ui-check` clicks through the real
+UI, writes screenshots to `artifacts/`, and fails on any renderer console error.
 
 ## Project layout
 
@@ -124,7 +137,8 @@ electron/            main process
     connections.ts   connection CRUD, URI building, client options
     pool.ts          live MongoClients and server info
     query.ts         query evaluation and result shaping
-    stats.ts         database/collection/index statistics
+    stats.ts         statistics, index management, document editing
+    library.ts       query history and saved queries
     transfer.ts      native streaming import & export
     tools.ts         optional MongoDB Database Tools detection and execution
     csv.ts           CSV encode/parse and document flattening
@@ -132,7 +146,7 @@ electron/            main process
 electron/preload.ts  the only renderer↔main bridge (context isolation is on)
 shared/types.ts      types shared by both processes
 src/                 React renderer
-scripts/             build, dev, icon, smoke and UI-check harnesses
+scripts/             build, dev, icon, mongod, smoke and UI-check harnesses
 ```
 
 ## Security notes

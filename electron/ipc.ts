@@ -5,10 +5,13 @@ import type {
   AppSettings,
   ConnectionConfig,
   ConnectionSecrets,
+  CreateIndexRequest,
+  DocumentRef,
   ExportRequest,
   ImportRequest,
   QueryRequest,
   Result,
+  SavedQuery,
   ToolRunRequest,
   TransferProgress
 } from '../shared/types.js';
@@ -32,13 +35,27 @@ import { runQuery } from './services/query.js';
 import {
   collectionStats,
   createCollection,
+  createIndex,
   databaseStats,
+  deleteDocument,
   dropCollection,
   dropDatabase,
+  dropIndex,
+  getDocument,
   indexesFor,
+  insertDocument,
   listCollections,
-  listDatabases
+  listDatabases,
+  replaceDocument
 } from './services/stats.js';
+import {
+  clearHistory,
+  listHistory,
+  listSavedQueries,
+  recordHistory,
+  removeSavedQuery,
+  saveQuery
+} from './services/library.js';
 import { loadSettings, saveSettings } from './services/store.js';
 import { cancelJob, exportCollection, importCollection } from './services/transfer.js';
 import { cancelToolJob, detectTools, runTool } from './services/tools.js';
@@ -181,7 +198,71 @@ export function registerIpcHandlers(): void {
     return null;
   });
 
-  handle('query:run', (request: QueryRequest) => runQuery(request));
+  handle('data:createIndex', (request: CreateIndexRequest) => createIndex(request));
+  handle(
+    'data:dropIndex',
+    async (connectionId: string, database: string, collection: string, indexName: string) => {
+      await dropIndex(connectionId, database, collection, indexName);
+      return null;
+    }
+  );
+  handle('data:getDocument', (ref: DocumentRef) => getDocument(ref));
+  handle('data:replaceDocument', async (ref: DocumentRef, documentJson: string) => {
+    await replaceDocument(ref, documentJson);
+    return null;
+  });
+  handle(
+    'data:insertDocument',
+    (connectionId: string, database: string, collection: string, documentJson: string) =>
+      insertDocument(connectionId, database, collection, documentJson)
+  );
+  handle('data:deleteDocument', async (ref: DocumentRef) => {
+    await deleteDocument(ref);
+    return null;
+  });
+
+  handle('query:run', async (request: QueryRequest) => {
+    const connectionName = listConnections().find((c) => c.id === request.connectionId)?.name ?? '';
+    try {
+      const result = await runQuery(request);
+      recordHistory({
+        connectionId: request.connectionId,
+        connectionName,
+        database: request.database,
+        code: request.code,
+        durationMs: result.durationMs,
+        ok: true,
+        totalReturned: result.totalReturned
+      });
+      return result;
+    } catch (error) {
+      recordHistory({
+        connectionId: request.connectionId,
+        connectionName,
+        database: request.database,
+        code: request.code,
+        durationMs: 0,
+        ok: false,
+        totalReturned: 0,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      throw error;
+    }
+  });
+
+  handle('library:history', (limit?: number) => listHistory(limit));
+  handle('library:clearHistory', () => {
+    clearHistory();
+    return null;
+  });
+  handle('library:savedQueries', () => listSavedQueries());
+  handle('library:saveQuery', (query: Partial<SavedQuery> & { name: string; code: string }) =>
+    saveQuery(query)
+  );
+  handle('library:removeSavedQuery', (id: string) => {
+    removeSavedQuery(id);
+    return null;
+  });
 
   handle('transfer:export', (request: ExportRequest) => exportCollection(request, broadcast));
   handle('transfer:import', (request: ImportRequest) => importCollection(request, broadcast));

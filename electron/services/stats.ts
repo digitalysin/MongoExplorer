@@ -1,11 +1,19 @@
-import type { Db, Document } from 'mongodb';
+import type {
+  CreateIndexesOptions,
+  Db,
+  Document,
+  IndexSpecification
+} from 'mongodb';
 import type {
   CollectionStats,
   CollectionSummary,
+  CreateIndexRequest,
   DatabaseStats,
   DatabaseSummary,
+  DocumentRef,
   IndexInfo
 } from '../../shared/types.js';
+import { EJSON, evaluateExpression } from './bsonEval.js';
 import { getClient, getDb } from './pool.js';
 
 const SAMPLE_SIZE = 200;
@@ -235,4 +243,107 @@ export async function dropCollection(
 
 export async function dropDatabase(connectionId: string, database: string): Promise<void> {
   await getDb(connectionId, database).dropDatabase();
+}
+
+export async function createIndex(request: CreateIndexRequest): Promise<{ name: string }> {
+  const keys = evaluateExpression<IndexSpecification>(request.keys, 'index keys');
+  if (!keys || Object.keys(keys).length === 0) {
+    throw new Error('Specify at least one index key, e.g. { createdAt: -1 }.');
+  }
+
+  const options: CreateIndexesOptions = {};
+  if (request.name?.trim()) options.name = request.name.trim();
+  if (request.unique) options.unique = true;
+  if (request.sparse) options.sparse = true;
+  if (typeof request.expireAfterSeconds === 'number') {
+    options.expireAfterSeconds = request.expireAfterSeconds;
+  }
+  const partial = evaluateExpression<Document>(request.partialFilter, 'partial filter expression');
+  if (partial) options.partialFilterExpression = partial;
+  const collation = evaluateExpression<Document>(request.collation, 'collation');
+  if (collation) options.collation = collation as CreateIndexesOptions['collation'];
+
+  const name = await getDb(request.connectionId, request.database)
+    .collection(request.collection)
+    .createIndex(keys, options);
+  return { name };
+}
+
+export async function dropIndex(
+  connectionId: string,
+  database: string,
+  collection: string,
+  indexName: string
+): Promise<void> {
+  if (indexName === '_id_') throw new Error('The _id index cannot be dropped.');
+  await getDb(connectionId, database).collection(collection).dropIndex(indexName);
+}
+
+/**
+ * Documents are read back in canonical EJSON so an edit round-trip cannot
+ * silently change an int64 into a double.
+ */
+export async function getDocument(ref: DocumentRef): Promise<string> {
+  const filter = { _id: parseId(ref.idJson) };
+  const document = await getDb(ref.connectionId, ref.database)
+    .collection(ref.collection)
+    .findOne(filter as Document);
+  if (!document) throw new Error('That document no longer exists.');
+  return EJSON.stringify(document, undefined, 2, { relaxed: false });
+}
+
+export async function replaceDocument(ref: DocumentRef, documentJson: string): Promise<void> {
+  const replacement = parseDocument(documentJson);
+  const id = parseId(ref.idJson);
+  // Mongo rejects a replacement that changes _id, so compare before writing.
+  if ('_id' in replacement && !idsEqual(replacement._id, id)) {
+    throw new Error('The _id of an existing document cannot be changed.');
+  }
+  delete (replacement as Record<string, unknown>)._id;
+  const result = await getDb(ref.connectionId, ref.database)
+    .collection(ref.collection)
+    .replaceOne({ _id: id } as Document, replacement);
+  if (result.matchedCount === 0) throw new Error('That document no longer exists.');
+}
+
+export async function insertDocument(
+  connectionId: string,
+  database: string,
+  collection: string,
+  documentJson: string
+): Promise<{ insertedId: unknown }> {
+  const document = parseDocument(documentJson);
+  const result = await getDb(connectionId, database).collection(collection).insertOne(document);
+  return { insertedId: EJSON.serialize(result.insertedId, { relaxed: true }) };
+}
+
+export async function deleteDocument(ref: DocumentRef): Promise<void> {
+  const result = await getDb(ref.connectionId, ref.database)
+    .collection(ref.collection)
+    .deleteOne({ _id: parseId(ref.idJson) } as Document);
+  if (result.deletedCount === 0) throw new Error('That document no longer exists.');
+}
+
+function parseDocument(json: string): Document {
+  try {
+    const parsed = EJSON.parse(json, { relaxed: false });
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('a document must be a JSON object');
+    }
+    return parsed as Document;
+  } catch (error) {
+    throw new Error(`Invalid document: ${(error as Error).message}`);
+  }
+}
+
+function parseId(idJson: string): unknown {
+  try {
+    return EJSON.parse(idJson, { relaxed: false });
+  } catch (error) {
+    throw new Error(`Invalid document id: ${(error as Error).message}`);
+  }
+}
+
+function idsEqual(left: unknown, right: unknown): boolean {
+  return EJSON.stringify(left, { relaxed: false }) === EJSON.stringify(right, { relaxed: false });
 }

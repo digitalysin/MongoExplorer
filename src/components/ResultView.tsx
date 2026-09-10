@@ -5,7 +5,34 @@ import { EmptyState, Modal } from './ui';
 
 export type ResultMode = 'table' | 'json';
 
-export function ResultView({ result, mode }: { result: QueryResult; mode: ResultMode }) {
+/** Canonical EJSON for an `_id` taken from a relaxed-EJSON row. */
+function idJsonOf(row: Record<string, unknown> | undefined): string | null {
+  if (!row || !('_id' in row)) return null;
+  const id = row._id;
+  if (id && typeof id === 'object') {
+    const record = id as Record<string, unknown>;
+    if (typeof record.$oid === 'string') return JSON.stringify({ $oid: record.$oid });
+    // Other BSON wrappers already are canonical enough to round-trip.
+    return JSON.stringify(id);
+  }
+  if (typeof id === 'number') {
+    return Number.isInteger(id)
+      ? JSON.stringify({ $numberLong: String(id) })
+      : JSON.stringify({ $numberDouble: String(id) });
+  }
+  return JSON.stringify(id);
+}
+
+export function ResultView({
+  result,
+  mode,
+  onEditDocument
+}: {
+  result: QueryResult;
+  mode: ResultMode;
+  /** Absent when the result is not tied to a single editable collection. */
+  onEditDocument?: (idJson: string) => void;
+}) {
   const [inspected, setInspected] = useState<unknown>(null);
 
   const rows = useMemo(
@@ -59,9 +86,20 @@ export function ResultView({ result, mode }: { result: QueryResult; mode: Result
           </tr>
         </thead>
         <tbody>
-          {rows.map((row, index) => (
+          {rows.map((row, index) => {
+            const idJson = idJsonOf(row);
+            const editable = Boolean(onEditDocument && idJson);
+            return (
             <tr key={index} onDoubleClick={() => setInspected(row)}>
-              <td className="cell-index">{index + 1}</td>
+              <td
+                className="cell-index"
+                title={editable ? 'Edit this document' : undefined}
+                onClick={() => editable && onEditDocument?.(idJson as string)}
+                style={editable ? { cursor: 'pointer' } : undefined}
+              >
+                {editable ? '✎ ' : ''}
+                {index + 1}
+              </td>
               {result.columns.map((column) => {
                 const value = row?.[column];
                 const type = valueType(value);
@@ -83,7 +121,8 @@ export function ResultView({ result, mode }: { result: QueryResult; mode: Result
                 );
               })}
             </tr>
-          ))}
+            );
+          })}
         </tbody>
       </table>
 

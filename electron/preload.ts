@@ -3,10 +3,13 @@ import type {
   AppSettings,
   ConnectionConfig,
   ConnectionSecrets,
+  CreateIndexRequest,
+  DocumentRef,
   ExportRequest,
   ImportRequest,
   QueryRequest,
   RendererApi,
+  SavedQuery,
   ToolRunRequest,
   TransferProgress
 } from '../shared/types.js';
@@ -54,10 +57,35 @@ const api: RendererApi = {
     dropCollection: (connectionId: string, database: string, collection: string) =>
       invoke('data:dropCollection', connectionId, database, collection),
     dropDatabase: (connectionId: string, database: string) =>
-      invoke('data:dropDatabase', connectionId, database)
+      invoke('data:dropDatabase', connectionId, database),
+    createIndex: (request: CreateIndexRequest) => invoke('data:createIndex', request),
+    dropIndex: (
+      connectionId: string,
+      database: string,
+      collection: string,
+      indexName: string
+    ) => invoke('data:dropIndex', connectionId, database, collection, indexName),
+    getDocument: (ref: DocumentRef) => invoke('data:getDocument', ref),
+    replaceDocument: (ref: DocumentRef, documentJson: string) =>
+      invoke('data:replaceDocument', ref, documentJson),
+    insertDocument: (
+      connectionId: string,
+      database: string,
+      collection: string,
+      documentJson: string
+    ) => invoke('data:insertDocument', connectionId, database, collection, documentJson),
+    deleteDocument: (ref: DocumentRef) => invoke('data:deleteDocument', ref)
   },
   query: {
     run: (request: QueryRequest) => invoke('query:run', request)
+  },
+  library: {
+    history: (limit?: number) => invoke('library:history', limit),
+    clearHistory: () => invoke('library:clearHistory'),
+    savedQueries: () => invoke('library:savedQueries'),
+    saveQuery: (query: Partial<SavedQuery> & { name: string; code: string }) =>
+      invoke('library:saveQuery', query),
+    removeSavedQuery: (id: string) => invoke('library:removeSavedQuery', id)
   },
   transfer: {
     exportCollection: (request: ExportRequest) => invoke('transfer:export', request),

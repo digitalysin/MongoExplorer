@@ -1,7 +1,7 @@
 {
   "name": "mongo-explorer",
   "productName": "Mongo Explorer",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Cross-platform desktop GUI for MongoDB: saved connections, query editor, stats and import/export",
   "author": {
     "name": "Mongo Explorer",

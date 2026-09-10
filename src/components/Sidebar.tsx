@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { ConnectionConfig } from '../../shared/types';
 import { formatBytes, formatNumber } from '../lib/format';
 import { collectionsKey, useStore } from '../state/store';
+import { SidebarResizer } from './SidebarResizer';
 import { Button, Spinner } from './ui';
 
 interface SidebarProps {
@@ -311,6 +312,8 @@ export function Sidebar(props: SidebarProps) {
           );
         })}
       </div>
+
+      <SidebarResizer />
     </aside>
   );
 }

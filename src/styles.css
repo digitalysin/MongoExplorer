@@ -117,11 +117,33 @@ textarea {
 
 .sidebar {
   grid-area: sidebar;
+  position: relative;
   background: var(--bg-elevated);
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+.sidebar-resizer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 5px;
+  z-index: 5;
+  cursor: col-resize;
+}
+
+.sidebar-resizer:hover,
+body.is-resizing .sidebar-resizer {
+  background: var(--accent);
+}
+
+/* Holds the cursor steady while the pointer travels outside the handle. */
+body.is-resizing {
+  cursor: col-resize;
+  user-select: none;
 }
 
 .sidebar-header {
@@ -224,15 +246,23 @@ textarea {
 
 .tree-node .label {
   flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .tree-node .meta {
+  flex: none;
+  white-space: nowrap;
   color: var(--text-faint);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
+}
+
+/* Hovering swaps the count for the row actions, which also frees space for the name. */
+.tree-node:hover .meta {
+  display: none;
 }
 
 .tree-node.level-1 {

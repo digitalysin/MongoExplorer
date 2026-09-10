@@ -42,6 +42,8 @@ async function seedDatabase(): Promise<void> {
   );
   await db.collection('orders').createIndex({ reference: 1 }, { unique: true });
   await db.collection('orders').createIndex({ status: 1, createdAt: -1 });
+  // Long enough to be clipped at the default sidebar width — the resize check depends on it.
+  await db.collection('price_update_configuration_history_archive').insertOne({ note: 'long name' });
   await db.collection('customers').insertMany(
     Array.from({ length: 40 }, (_, index) => ({
       name: `Customer ${index}`,
@@ -199,27 +201,64 @@ async function main(): Promise<void> {
   await wait(400);
   await shoot(window, '07-tree');
 
+  console.log('  widening the sidebar…');
+  const clippedNames = () =>
+    window.webContents.executeJavaScript(`
+      [...document.querySelectorAll('.tree-node.level-2 .label')]
+        .filter((node) => node.scrollWidth > node.clientWidth + 1).length
+    `) as Promise<number>;
+  if ((await clippedNames()) === 0) {
+    throw new Error('expected a long collection name to be clipped at the default width');
+  }
+  const widened = await window.webContents.executeJavaScript(`
+    (() => {
+      const handle = document.querySelector('.sidebar-resizer');
+      if (!handle) return { ok: false, reason: 'no resize handle' };
+      const before = document.querySelector('.sidebar').getBoundingClientRect().width;
+      const y = handle.getBoundingClientRect().top + 40;
+      const opts = { bubbles: true, clientY: y, pointerId: 1 };
+      handle.dispatchEvent(new PointerEvent('pointerdown', { ...opts, clientX: before }));
+      window.dispatchEvent(new PointerEvent('pointermove', { ...opts, clientX: before + 180 }));
+      window.dispatchEvent(new PointerEvent('pointerup', { ...opts, clientX: before + 180 }));
+      const after = document.querySelector('.sidebar').getBoundingClientRect().width;
+      return { ok: true, before, after, stored: localStorage.getItem('mongo-explorer:sidebar-width') };
+    })()
+  `);
+  if (!widened.ok) throw new Error(`sidebar resize failed: ${widened.reason}`);
+  if (widened.after < widened.before + 150) {
+    throw new Error(`dragging did not widen the sidebar: ${widened.before} -> ${widened.after}`);
+  }
+  if (widened.stored === null) throw new Error('the new width was not remembered');
+  await wait(500);
+  // A clipped label reports a scroll width wider than the box drawn for it.
+  const stillClipped = await clippedNames();
+  if (stillClipped > 0) {
+    throw new Error(`${stillClipped} collection names are still clipped at ${widened.after}px`);
+  }
+  console.log(`    ${Math.round(widened.before)}px -> ${Math.round(widened.after)}px, no clipped names`);
+  await shoot(window, '08-sidebar-widened');
+
   console.log('  opening a query tab…');
   await click(window, '.titlebar-actions .btn', 'New query');
   await wait(600);
   await click(window, '.toolbar .btn-primary');
   await wait(2000);
-  await shoot(window, '08-query-results');
+  await shoot(window, '09-query-results');
 
   console.log('  switching the result to JSON…');
   await click(window, '.segmented button', 'JSON');
   await wait(500);
-  await shoot(window, '09-query-json');
+  await shoot(window, '10-query-json');
 
   console.log('  opening statistics…');
   await click(window, '.titlebar-actions .btn', 'Statistics');
   await wait(2500);
-  await shoot(window, '10-statistics');
+  await shoot(window, '11-statistics');
 
   console.log('  opening the create-index dialog…');
   await click(window, '.stats-section .btn', 'Create index');
   await wait(600);
-  await shoot(window, '11-create-index');
+  await shoot(window, '12-create-index');
   await click(window, '.modal-footer .btn', 'Cancel');
   await wait(300);
 
@@ -228,28 +267,28 @@ async function main(): Promise<void> {
   await wait(500);
   await click(window, '.cell-index');
   await wait(1200);
-  await shoot(window, '12-document-editor');
+  await shoot(window, '13-document-editor');
   await click(window, '.modal-footer .btn', 'Close');
   await wait(300);
 
   console.log('  opening the query library…');
   await click(window, '.toolbar .btn', 'History');
   await wait(900);
-  await shoot(window, '13-query-library');
+  await shoot(window, '14-query-library');
   await click(window, '.modal-footer .btn', 'Close');
   await wait(300);
 
   console.log('  opening the export dialog…');
   await click(window, '.titlebar-actions .btn', 'Export');
   await wait(600);
-  await shoot(window, '14-export');
+  await shoot(window, '15-export');
   await click(window, '.modal-footer .btn', 'Close');
   await wait(300);
 
   console.log('  opening settings…');
   await click(window, '.titlebar-actions .btn', 'Settings');
   await wait(1500);
-  await shoot(window, '15-settings');
+  await shoot(window, '16-settings');
 
   const client = new MongoClient(`mongodb://${HOST}`);
   await client.connect();

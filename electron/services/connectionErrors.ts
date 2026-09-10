@@ -70,6 +70,17 @@ function hostLabel(link: ErrorLike | null, config: Partial<ConnectionConfig>): s
   return config.hosts?.[0] ?? 'the server';
 }
 
+const bareHost = (host: string): string => host.replace(/:\d+$/, '').toLowerCase();
+
+/** The hosts the user actually entered, whichever input mode they used. */
+function configuredHosts(config: Partial<ConnectionConfig>): string[] {
+  if (config.mode !== 'fields') {
+    const authority = config.uri?.match(/^mongodb(?:\+srv)?:\/\/(?:[^@/]*@)?([^/?]+)/i)?.[1] ?? '';
+    return authority.split(',').filter(Boolean).map(bareHost);
+  }
+  return (config.hosts ?? []).map(bareHost);
+}
+
 function messageOf(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error);
@@ -89,11 +100,22 @@ export function explainConnectionError(
   const notFound = findCode(error, ['ENOTFOUND']);
   if (notFound) {
     const host = hostLabel(notFound, config);
-    const detail = original.includes('querySrv')
-      ? `No SRV record (_mongodb._tcp.${host}) exists for "${host}".`
-      : `DNS returned no address for "${host}".`;
+    if (original.includes('querySrv')) {
+      return wrap(
+        `No SRV record (_mongodb._tcp.${host}) exists for "${host}". Check the hostname for a typo, and if it is an internal host, that you are on the VPN that publishes it.`,
+        error
+      );
+    }
+    // A replica set reports its members by their own names. When the failure names a host the user
+    // never entered, the address they gave was reached and the member list is what broke.
+    if (!configuredHosts(config).includes(bareHost(host))) {
+      return wrap(
+        `Reached the server, but the replica set advertises its members as "${host}", and that name does not resolve here. Tick "Direct connection (skip topology discovery)" to talk only to the address you entered.`,
+        error
+      );
+    }
     return wrap(
-      `${detail} Check the hostname for a typo, and if it is an internal host, that you are on the VPN that publishes it.`,
+      `DNS returned no address for "${host}". Check the hostname for a typo, and if it is an internal host, that you are on the VPN that publishes it.`,
       error
     );
   }

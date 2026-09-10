@@ -884,6 +884,34 @@ async function main(): Promise<void> {
     assert.equal(explained.cause, selection);
   });
 
+  await check('an unresolvable replica set member points at direct connection', () => {
+    // A replica set answers on the address you gave, then advertises members by their own names.
+    const inner = Object.assign(new Error('getaddrinfo ENOTFOUND db-prod-1.internal'), {
+      code: 'ENOTFOUND',
+      hostname: 'db-prod-1.internal'
+    });
+    const explained = explainConnectionError(
+      Object.assign(new Error('Server selection timed out after 10000 ms'), {
+        servers: new Map([['db-prod-1.internal:27017', { error: inner }]])
+      }),
+      { mode: 'fields', hosts: ['10.100.15.205:27017'] }
+    );
+    assert.match(explained.message, /replica set advertises its members as "db-prod-1\.internal"/);
+    assert.match(explained.message, /Direct connection/);
+  });
+
+  await check('a host the user did enter is still reported as a plain DNS failure', () => {
+    const explained = explainConnectionError(
+      Object.assign(new Error('getaddrinfo ENOTFOUND db-prod-1.internal'), {
+        code: 'ENOTFOUND',
+        hostname: 'db-prod-1.internal'
+      }),
+      { mode: 'fields', hosts: ['db-prod-1.internal:27017'] }
+    );
+    assert.match(explained.message, /DNS returned no address/);
+    assert.doesNotMatch(explained.message, /Direct connection/);
+  });
+
   await check('an SRV lookup failure names the SRV record', () => {
     const explained = explainConnectionError(
       Object.assign(new Error('querySrv ENOTFOUND _mongodb._tcp.cluster0.example.net'), {

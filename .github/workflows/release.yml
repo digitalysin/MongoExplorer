@@ -31,15 +31,12 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build
-      # Electron refuses to start unless its SUID sandbox helper is owned by
-      # root, which npm cannot do when it unpacks the binary.
-      - name: Grant Electron's sandbox helper its permissions
-        run: |
-          sudo chown root:root node_modules/electron/dist/chrome-sandbox
-          sudo chmod 4755 node_modules/electron/dist/chrome-sandbox
-      # Electron also needs a virtual display on a headless runner.
+      # Electron needs a virtual display on a headless runner, and its SUID
+      # sandbox cannot work here because the helper binary is not owned by root.
       - name: Smoke test
         run: xvfb-run --auto-servernum npm run smoke
+        env:
+          ELECTRON_DISABLE_SANDBOX: '1'
 
   version:
     name: Bump version

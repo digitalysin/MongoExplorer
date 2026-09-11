@@ -110,6 +110,32 @@ export function Modal({
   );
 }
 
+/**
+ * A determinate bar when the share is known, and a sliding one when it is not —
+ * a job whose size nobody can count still has to look alive.
+ */
+export function ProgressBar({ fraction }: { fraction: number | null }) {
+  if (fraction === null) {
+    return (
+      <div className="progress is-indeterminate" role="progressbar">
+        <span />
+      </div>
+    );
+  }
+  const percent = Math.min(100, Math.max(0, fraction * 100));
+  return (
+    <div
+      className="progress"
+      role="progressbar"
+      aria-valuenow={Math.round(percent)}
+      aria-valuemin={0}
+      aria-valuemax={100}
+    >
+      <span style={{ width: `${percent}%` }} />
+    </div>
+  );
+}
+
 export function Spinner({ label }: { label?: string }) {
   return (
     <span className="spinner-wrap">

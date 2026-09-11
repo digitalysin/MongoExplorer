@@ -21,6 +21,18 @@ export function formatDuration(ms: number): string {
   return `${minutes}m ${seconds}s`;
 }
 
+/** A running clock for something still in progress: 0:07, 4:31, 1:02:18. */
+export function formatElapsed(ms: number): string {
+  const total = Math.max(0, Math.round(ms / 1000));
+  const seconds = total % 60;
+  const minutes = Math.floor(total / 60) % 60;
+  const hours = Math.floor(total / 3600);
+  const padded = (value: number) => String(value).padStart(2, '0');
+  return hours > 0
+    ? `${hours}:${padded(minutes)}:${padded(seconds)}`
+    : `${minutes}:${padded(seconds)}`;
+}
+
 export function formatUptime(seconds: number | null): string {
   if (seconds === null) return '—';
   const days = Math.floor(seconds / 86_400);

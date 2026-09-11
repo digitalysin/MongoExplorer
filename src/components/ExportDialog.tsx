@@ -2,7 +2,9 @@ import { useState } from 'react';
 import type { ExportFormat } from '../../shared/types';
 import { api, errorMessage, unwrap } from '../lib/api';
 import { formatDuration, formatNumber } from '../lib/format';
+import { isCancellation } from '../lib/transferProgress';
 import { useStore } from '../state/store';
+import { TransferProgressPanel } from './TransferProgressPanel';
 import { suggestFileName, useToolDetection, useTransferLog } from './transfer';
 import { Badge, Button, Checkbox, Field, Modal, Select, Spinner, TextInput } from './ui';
 
@@ -118,10 +120,20 @@ export function ExportDialog({
         store.notify(`Exported ${formatNumber(result.processed)} documents`);
       }
     } catch (caught) {
-      setError(errorMessage(caught));
+      if (isCancellation(caught)) {
+        setDone('Stopped before it finished. The partial file is still on disk.');
+        store.notify('Stopped the export');
+      } else {
+        setError(errorMessage(caught));
+      }
     } finally {
       setRunning(false);
     }
+  };
+
+  const stop = async () => {
+    const jobId = log.progress?.jobId;
+    if (jobId) await unwrap(api.transfer.cancel(jobId));
   };
 
   return (
@@ -132,12 +144,6 @@ export function ExportDialog({
       width={700}
       footer={
         <>
-          {log.progress && running ? (
-            <span className="dim">
-              {formatNumber(log.progress.processed)}
-              {log.progress.total ? ` / ${formatNumber(log.progress.total)}` : ''} documents
-            </span>
-          ) : null}
           <span className="spacer" />
           <Button onClick={onClose}>Close</Button>
           <Button variant="primary" onClick={() => void run()} disabled={running}>
@@ -270,6 +276,10 @@ export function ExportDialog({
         <Field label="Fields" wide hint="Required when exporting CSV through mongoexport.">
           <TextInput value={fields} onChange={(event) => setFields(event.target.value)} />
         </Field>
+      ) : null}
+
+      {log.progress && running ? (
+        <TransferProgressPanel progress={log.progress} onCancel={() => void stop()} />
       ) : null}
 
       {log.lines.length > 0 ? (

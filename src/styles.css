@@ -1102,6 +1102,68 @@ textarea.input {
   overflow: auto;
 }
 
+.progress {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--bg-hover);
+  overflow: hidden;
+  position: relative;
+}
+
+.progress > span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: 3px;
+  transition: width 160ms linear;
+}
+
+/* No total to divide by, so the bar paces instead of filling. */
+.progress.is-indeterminate > span {
+  width: 35%;
+  animation: progress-slide 1.1s ease-in-out infinite;
+}
+
+@keyframes progress-slide {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(285%);
+  }
+}
+
+.transfer-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+}
+
+.transfer-progress .row {
+  align-items: center;
+  gap: 8px;
+}
+
+.transfer-progress-meta {
+  font-size: 11.5px;
+}
+
+.transfer-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.transfer-status .progress {
+  width: 70px;
+  height: 4px;
+}
+
 .log-panel {
   background: var(--bg);
   border: 1px solid var(--border);

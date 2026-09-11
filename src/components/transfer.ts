@@ -58,6 +58,20 @@ export function useToolDetection(enabled: boolean) {
   return { tools, loading, refresh };
 }
 
+/** Re-renders on a timer so an elapsed clock keeps moving between events. */
+export function useTicker(active: boolean, everyMs = 500): number {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!active) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), everyMs);
+    return () => clearInterval(timer);
+  }, [active, everyMs]);
+
+  return now;
+}
+
 export function suggestFileName(
   database: string,
   collection: string,

@@ -8,6 +8,7 @@ import { QueryWorkspace, type QueryTabState } from './components/QueryWorkspace'
 import { SettingsDialog } from './components/SettingsDialog';
 import { Sidebar } from './components/Sidebar';
 import { StatsView, type StatsTabState } from './components/StatsView';
+import { TransferStatus } from './components/TransferProgressPanel';
 import { Button, EmptyState, Modal } from './components/ui';
 import { api, unwrap } from './lib/api';
 import { useStore } from './state/store';
@@ -364,8 +365,9 @@ export default function App() {
               {selection.collection ? `.${selection.collection}` : ''}
             </span>
           ) : null}
-          {store.activity[0] && store.activity[0].phase === 'running' ? (
-            <span>{store.activity[0].message ?? 'Working…'}</span>
+          {store.activity[0] &&
+          (store.activity[0].phase === 'running' || store.activity[0].phase === 'starting') ? (
+            <TransferStatus progress={store.activity[0]} />
           ) : null}
         </div>
       </footer>

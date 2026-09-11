@@ -83,6 +83,14 @@ Tools** (or let it auto-detect them from your `PATH`).
 - Optional external-tool routes: `mongodump`/`mongorestore` for BSON dumps and
   `mongoexport`/`mongoimport` if you prefer them. Their output is streamed into
   the dialog's log panel.
+- A long transfer shows a progress bar with the share done, the documents or
+  bytes covered, how long it has been running, the current rate and roughly how
+  much longer it needs. Exports divide by a counted total, imports by the size
+  of the file, and the external tools by the progress they print; a job nobody
+  can measure gets a moving bar rather than a fake percentage.
+- **Stop** ends a running transfer without closing the app, and says what it
+  left behind. Close the dialog and the status bar keeps the bar, the percentage
+  and the clock until the job ends.
 
 **Telling you what happened**
 - A finished operation confirms itself with a small toast in the corner that

@@ -2,7 +2,9 @@ import { useState } from 'react';
 import type { ImportFormat, ImportMode } from '../../shared/types';
 import { api, errorMessage, unwrap } from '../lib/api';
 import { formatDuration, formatNumber } from '../lib/format';
+import { isCancellation } from '../lib/transferProgress';
 import { useStore } from '../state/store';
+import { TransferProgressPanel } from './TransferProgressPanel';
 import { useToolDetection, useTransferLog } from './transfer';
 import { Badge, Button, Checkbox, Field, Modal, Select, Spinner, TextInput } from './ui';
 
@@ -138,10 +140,21 @@ export function ImportDialog({
       }
       onImported();
     } catch (caught) {
-      setError(errorMessage(caught));
+      if (isCancellation(caught)) {
+        setDone('Stopped before it finished. Documents already written stay in the collection.');
+        store.notify('Stopped the import');
+        onImported();
+      } else {
+        setError(errorMessage(caught));
+      }
     } finally {
       setRunning(false);
     }
+  };
+
+  const stop = async () => {
+    const jobId = log.progress?.jobId;
+    if (jobId) await unwrap(api.transfer.cancel(jobId));
   };
 
   return (
@@ -152,11 +165,6 @@ export function ImportDialog({
       width={700}
       footer={
         <>
-          {log.progress && running ? (
-            <span className="dim">
-              {formatNumber(log.progress.processed)} documents · {log.progress.message}
-            </span>
-          ) : null}
           <span className="spacer" />
           <Button onClick={onClose}>Close</Button>
           <Button variant="primary" onClick={() => void run()} disabled={running}>
@@ -280,6 +288,10 @@ export function ImportDialog({
           <Checkbox label="Stop on first error" checked={stopOnError} onChange={setStopOnError} />
         ) : null}
       </div>
+
+      {log.progress && running ? (
+        <TransferProgressPanel progress={log.progress} onCancel={() => void stop()} />
+      ) : null}
 
       {log.lines.length > 0 ? (
         <div className="log-panel" ref={log.containerRef}>

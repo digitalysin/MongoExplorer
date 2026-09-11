@@ -9,7 +9,7 @@ import { SettingsDialog } from './components/SettingsDialog';
 import { Sidebar } from './components/Sidebar';
 import { StatsView, type StatsTabState } from './components/StatsView';
 import { Button, EmptyState, Modal } from './components/ui';
-import { api, errorMessage, unwrap } from './lib/api';
+import { api, unwrap } from './lib/api';
 import { useStore } from './state/store';
 
 type Tab = QueryTabState | StatsTabState;
@@ -120,13 +120,9 @@ export default function App() {
       try {
         await unwrap(api.data.dropCollection(connectionId, database, collection));
         await store.loadCollections(connectionId, database, true);
-        store.pushToast({ kind: 'success', message: `Dropped ${database}.${collection}` });
+        store.notify(`Dropped ${database}.${collection}`);
       } catch (error) {
-        store.pushToast({
-          kind: 'error',
-          message: 'Could not drop the collection',
-          detail: errorMessage(error)
-        });
+        store.reportError('Could not drop the collection', error);
       }
     };
     if (store.settings?.confirmDestructiveOps === false) {
@@ -150,13 +146,9 @@ export default function App() {
         );
         await store.loadDatabases(connectionId, true);
         store.select({ connectionId, database: null, collection: null });
-        store.pushToast({ kind: 'success', message: `Dropped ${database}` });
+        store.notify(`Dropped ${database}`);
       } catch (error) {
-        store.pushToast({
-          kind: 'error',
-          message: 'Could not drop the database',
-          detail: errorMessage(error)
-        });
+        store.reportError('Could not drop the database', error);
       }
     };
     if (store.settings?.confirmDestructiveOps === false) {
@@ -176,7 +168,7 @@ export default function App() {
     await store.loadDatabases(connectionId, true);
     await store.loadCollections(connectionId, database, true);
     store.select({ connectionId, database, collection });
-    store.pushToast({ kind: 'success', message: `Created ${database}.${collection}` });
+    store.notify(`Created ${database}.${collection}`);
   };
 
   const deleteConnection = (config: ConnectionConfig) => {
@@ -185,9 +177,14 @@ export default function App() {
       message: `"${config.name}" and its saved password will be removed from this computer. The database itself is not touched.`,
       confirmLabel: 'Delete',
       onConfirm: async () => {
-        await unwrap(api.connections.remove(config.id));
-        setTabs((current) => current.filter((tab) => tab.connectionId !== config.id));
-        await store.refreshConnections();
+        try {
+          await unwrap(api.connections.remove(config.id));
+          setTabs((current) => current.filter((tab) => tab.connectionId !== config.id));
+          await store.refreshConnections();
+          store.notify(`Deleted the connection “${config.name}”`);
+        } catch (error) {
+          store.reportError('Could not delete the connection', error);
+        }
       }
     });
   };
@@ -429,6 +426,34 @@ export default function App() {
             void store.loadCollections(importTarget.connectionId, importTarget.database, true)
           }
         />
+      ) : null}
+
+      {/* Failures stop the user: a toast would fade before it was read. */}
+      {store.errorReport ? (
+        <Modal
+          title="Something went wrong"
+          subtitle={store.errorReport.message}
+          onClose={store.dismissError}
+          width={560}
+          footer={
+            <>
+              <span className="spacer" />
+              <Button variant="primary" onClick={store.dismissError}>
+                Close
+              </Button>
+            </>
+          }
+        >
+          {store.errorReport.detail ? (
+            <div className="error-box" style={{ margin: 0 }}>
+              {store.errorReport.detail}
+            </div>
+          ) : (
+            <p style={{ margin: 0, lineHeight: 1.6 }}>
+              No further detail was reported. Check the deployment and try again.
+            </p>
+          )}
+        </Modal>
       ) : null}
 
       {confirm ? (

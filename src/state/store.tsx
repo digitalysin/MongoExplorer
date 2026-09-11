@@ -19,9 +19,18 @@ import type {
 } from '../../shared/types';
 import { api, errorMessage, unwrap } from '../lib/api';
 
+/**
+ * Toasts only ever carry good news — they fade on their own, which would let a
+ * failure go unread. Failures go to `reportError` and its blocking dialog.
+ */
 export interface Toast {
   id: string;
-  kind: 'info' | 'success' | 'error';
+  kind: 'info' | 'success';
+  message: string;
+  detail?: string;
+}
+
+export interface ErrorReport {
   message: string;
   detail?: string;
 }
@@ -45,6 +54,8 @@ interface StoreValue {
   selection: Selection | null;
   settings: AppSettings | null;
   toasts: Toast[];
+  /** The failure currently held in front of the user, if any. */
+  errorReport: ErrorReport | null;
   activity: ActivityEntry[];
   busy: boolean;
   refreshConnections: () => Promise<void>;
@@ -56,6 +67,11 @@ interface StoreValue {
   updateSettings: (patch: Partial<AppSettings>) => Promise<void>;
   pushToast: (toast: Omit<Toast, 'id'>) => void;
   dismissToast: (id: string) => void;
+  /** Confirms a finished operation without interrupting anyone. */
+  notify: (message: string) => void;
+  /** Stops the user with what failed and why. */
+  reportError: (message: string, error?: unknown) => void;
+  dismissError: () => void;
   clearActivity: () => void;
   isConnected: (id: string) => boolean;
 }
@@ -74,6 +90,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [selection, setSelection] = useState<Selection | null>(null);
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const [errorReport, setErrorReport] = useState<ErrorReport | null>(null);
   const [activity, setActivity] = useState<ActivityEntry[]>([]);
   const [busy, setBusy] = useState(false);
   const toastCounter = useRef(0);
@@ -82,14 +99,26 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     toastCounter.current += 1;
     const id = `toast-${toastCounter.current}`;
     setToasts((current) => [...current, { ...toast, id }]);
-    if (toast.kind !== 'error') {
-      setTimeout(() => setToasts((current) => current.filter((entry) => entry.id !== id)), 4000);
-    }
+    setTimeout(() => setToasts((current) => current.filter((entry) => entry.id !== id)), 4000);
   }, []);
 
   const dismissToast = useCallback((id: string) => {
     setToasts((current) => current.filter((entry) => entry.id !== id));
   }, []);
+
+  const notify = useCallback(
+    (message: string) => pushToast({ kind: 'success', message }),
+    [pushToast]
+  );
+
+  const reportError = useCallback((message: string, error?: unknown) => {
+    const detail = error === undefined ? undefined : errorMessage(error);
+    // The dialog is modal, so keep the first failure rather than overwriting it
+    // with whatever else fell over as a consequence.
+    setErrorReport((current) => current ?? { message, detail });
+  }, []);
+
+  const dismissError = useCallback(() => setErrorReport(null), []);
 
   const setLoading = useCallback((key: string, value: boolean) => {
     setLoadingKeys((current) => ({ ...current, [key]: value }));
@@ -106,9 +135,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       setActive(Object.fromEntries(activeList.map((info) => [info.connectionId, info])));
       setSettings(currentSettings);
     } catch (error) {
-      pushToast({ kind: 'error', message: 'Could not load connections', detail: errorMessage(error) });
+      reportError('Could not load the saved connections', error);
     }
-  }, [pushToast]);
+  }, [reportError]);
 
   const loadDatabases = useCallback(
     async (connectionId: string, force = false) => {
@@ -118,12 +147,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         const list = await unwrap(api.data.listDatabases(connectionId));
         setDatabases((current) => ({ ...current, [connectionId]: list }));
       } catch (error) {
-        pushToast({ kind: 'error', message: 'Could not list databases', detail: errorMessage(error) });
+        reportError('Could not list the databases', error);
       } finally {
         setLoading(connectionId, false);
       }
     },
-    [databases, pushToast, setLoading]
+    [databases, reportError, setLoading]
   );
 
   const loadCollections = useCallback(
@@ -135,16 +164,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         const list = await unwrap(api.data.listCollections(connectionId, database));
         setCollections((current) => ({ ...current, [key]: list }));
       } catch (error) {
-        pushToast({
-          kind: 'error',
-          message: `Could not list collections in ${database}`,
-          detail: errorMessage(error)
-        });
+        reportError(`Could not list the collections in ${database}`, error);
       } finally {
         setLoading(key, false);
       }
     },
-    [collections, pushToast, setLoading]
+    [collections, reportError, setLoading]
   );
 
   const connect = useCallback(
@@ -158,24 +183,26 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           connections.find((entry) => entry.id === id)?.defaultDatabase ?? null;
         setSelection({ connectionId: id, database: defaultDatabase, collection: null });
         if (defaultDatabase) await loadCollections(id, defaultDatabase, true);
-        pushToast({ kind: 'success', message: `Connected to ${info.name}` });
+        notify(`Connected to ${info.name}`);
         return true;
       } catch (error) {
-        pushToast({ kind: 'error', message: 'Connection failed', detail: errorMessage(error) });
+        reportError('Could not connect to the deployment', error);
         return false;
       } finally {
         setBusy(false);
       }
     },
-    [connections, loadCollections, loadDatabases, pushToast]
+    [connections, loadCollections, loadDatabases, notify, reportError]
   );
 
   const disconnect = useCallback(
     async (id: string) => {
+      const name = active[id]?.name ?? 'the deployment';
       try {
         await unwrap(api.connections.disconnect(id));
+        notify(`Disconnected from ${name}`);
       } catch (error) {
-        pushToast({ kind: 'error', message: 'Disconnect failed', detail: errorMessage(error) });
+        reportError('Could not close the connection cleanly', error);
       }
       setActive((current) => {
         const next = { ...current };
@@ -194,7 +221,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       );
       setSelection((current) => (current?.connectionId === id ? null : current));
     },
-    [pushToast]
+    [active, notify, reportError]
   );
 
   const updateSettings = useCallback(
@@ -202,17 +229,26 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       try {
         const updated = await unwrap(api.settings.update(patch));
         setSettings(updated);
+        notify('Saved the settings');
       } catch (error) {
-        pushToast({ kind: 'error', message: 'Could not save settings', detail: errorMessage(error) });
+        reportError('Could not save the settings', error);
       }
     },
-    [pushToast]
+    [notify, reportError]
   );
 
   useEffect(() => {
     void refreshConnections();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // A promise nobody caught still failed an operation the user started.
+  useEffect(() => {
+    const onRejection = (event: PromiseRejectionEvent) =>
+      reportError('An operation failed unexpectedly', event.reason);
+    window.addEventListener('unhandledrejection', onRejection);
+    return () => window.removeEventListener('unhandledrejection', onRejection);
+  }, [reportError]);
 
   useEffect(() => {
     return api.transfer.onProgress((progress) => {
@@ -250,6 +286,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       selection,
       settings,
       toasts,
+      errorReport,
       activity,
       busy,
       refreshConnections,
@@ -261,6 +298,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       updateSettings,
       pushToast,
       dismissToast,
+      notify,
+      reportError,
+      dismissError,
       clearActivity: () => setActivity([]),
       isConnected: (id: string) => Boolean(active[id])
     }),
@@ -273,6 +313,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       selection,
       settings,
       toasts,
+      errorReport,
       activity,
       busy,
       refreshConnections,
@@ -282,7 +323,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       loadCollections,
       updateSettings,
       pushToast,
-      dismissToast
+      dismissToast,
+      notify,
+      reportError,
+      dismissError
     ]
   );
 

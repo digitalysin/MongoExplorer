@@ -265,7 +265,12 @@ export interface TransferProgress {
   phase: 'starting' | 'running' | 'done' | 'error' | 'cancelled';
   processed: number;
   total: number | null;
+  /** Bytes written (export) or read (import) so far. */
   bytes?: number;
+  /** Bytes in the source, when known — the only usable share for an import. */
+  totalBytes?: number;
+  /** When the job began, so the UI can run its own clock and estimate. */
+  startedAt: string;
   message?: string;
   filePath?: string;
   errors?: string[];

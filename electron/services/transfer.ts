@@ -33,25 +33,32 @@ export function cancelJob(jobId: string): void {
 
 function throwIfCancelled(jobId: string): void {
   if (cancelled.has(jobId)) {
-    cancelled.delete(jobId);
     const error = new Error('Cancelled by user.');
     error.name = 'CancelledError';
     throw error;
   }
 }
 
+/** A request that arrived too late must not cancel the next job. */
+function forgetCancellation(jobId: string): void {
+  cancelled.delete(jobId);
+}
+
+type ProgressUpdate = Omit<TransferProgress, 'jobId' | 'kind' | 'phase' | 'startedAt' | 'filePath'>;
+
 function makeThrottledReporter(
   jobId: string,
   kind: TransferProgress['kind'],
   report: ProgressReporter,
-  filePath: string
+  filePath: string,
+  startedAt: string
 ) {
   let lastSent = 0;
-  return (processed: number, total: number | null, message?: string, force = false) => {
+  return (update: ProgressUpdate, force = false) => {
     const now = Date.now();
     if (!force && now - lastSent < PROGRESS_INTERVAL_MS) return;
     lastSent = now;
-    report({ jobId, kind, phase: 'running', processed, total, message, filePath });
+    report({ jobId, kind, phase: 'running', startedAt, filePath, ...update });
   };
 }
 
@@ -78,6 +85,7 @@ export async function exportCollection(
 ): Promise<TransferResult> {
   const jobId = randomUUID();
   const started = Date.now();
+  const startedAt = new Date(started).toISOString();
   const delimiter = ',';
   const db = getDb(request.connectionId, request.database);
   const collection = db.collection(request.collection);
@@ -92,13 +100,21 @@ export async function exportCollection(
     phase: 'starting',
     processed: 0,
     total: null,
+    startedAt,
     filePath: request.filePath,
     message: `Exporting ${request.database}.${request.collection}`
   });
 
-  const total = await collection
+  // Counting is what makes the progress bar and the estimate possible; a
+  // collection too large to count in 15s falls back to an open-ended bar.
+  const matched = await collection
     .countDocuments(filter, { maxTimeMS: 15_000 })
     .catch(() => null);
+  // Skip and limit decide how many of the matches actually get written.
+  const total =
+    matched === null
+      ? null
+      : Math.max(0, Math.min(matched - (request.skip ?? 0), request.limit ?? matched));
 
   let cursor = collection.find(filter, { projection: projection ?? undefined });
   if (sort) cursor = cursor.sort(sort as Sort);
@@ -107,13 +123,15 @@ export async function exportCollection(
 
   ensureParentDirectory(request.filePath);
   const stream = fs.createWriteStream(request.filePath, { encoding: 'utf8' });
-  const tick = makeThrottledReporter(jobId, 'export', report, request.filePath);
+  const tick = makeThrottledReporter(jobId, 'export', report, request.filePath, startedAt);
   const relaxed = request.jsonMode !== 'canonical';
+  // Publish the total before the first document, so the bar starts out honest.
+  tick({ processed: 0, total, bytes: 0 }, true);
 
   let processed = 0;
   try {
     if (request.format === 'csv') {
-      processed = await writeCsv(cursor, stream, request, delimiter, jobId, tick);
+      processed = await writeCsv(cursor, stream, request, delimiter, jobId, total, tick);
     } else {
       const isArray = request.format === 'json-array';
       if (isArray) await writeChunk(stream, '[\n');
@@ -128,7 +146,7 @@ export async function exportCollection(
           await writeChunk(stream, `${text}\n`);
         }
         processed += 1;
-        tick(processed, total);
+        tick({ processed, total, bytes: stream.bytesWritten });
       }
       if (isArray) await writeChunk(stream, '\n]\n');
     }
@@ -149,6 +167,7 @@ export async function exportCollection(
       phase: 'done',
       processed,
       total: processed,
+      startedAt,
       filePath: request.filePath,
       bytes: fs.statSync(request.filePath).size,
       message: `Exported ${processed.toLocaleString()} documents`
@@ -164,10 +183,13 @@ export async function exportCollection(
       phase: isCancel ? 'cancelled' : 'error',
       processed,
       total,
+      startedAt,
       filePath: request.filePath,
       message: error instanceof Error ? error.message : String(error)
     });
     throw error;
+  } finally {
+    forgetCancellation(jobId);
   }
 }
 
@@ -177,7 +199,8 @@ async function writeCsv(
   request: ExportRequest,
   delimiter: string,
   jobId: string,
-  tick: (processed: number, total: number | null) => void
+  total: number | null,
+  tick: (update: ProgressUpdate) => void
 ): Promise<number> {
   const buffered: Array<Record<string, unknown>> = [];
   let columns = request.fields?.filter((field) => field.trim().length > 0) ?? [];
@@ -212,13 +235,13 @@ async function writeCsv(
         for (const row of buffered) await writeRow(row);
         processed += buffered.length;
         buffered.length = 0;
-        tick(processed, null);
+        tick({ processed, total, bytes: stream.bytesWritten });
       }
       continue;
     }
     await writeRow(flat);
     processed += 1;
-    tick(processed, null);
+    tick({ processed, total, bytes: stream.bytesWritten });
   }
 
   if (!headerWritten) {
@@ -330,6 +353,7 @@ export async function importCollection(
 ): Promise<TransferResult> {
   const jobId = randomUUID();
   const started = Date.now();
+  const startedAt = new Date(started).toISOString();
   const db = getDb(request.connectionId, request.database);
   const collection = db.collection(request.collection);
   const format = detectFormat(request.filePath, request.format);
@@ -343,6 +367,8 @@ export async function importCollection(
     phase: 'starting',
     processed: 0,
     total: null,
+    totalBytes: fileSize,
+    startedAt,
     filePath: request.filePath,
     message: `Importing into ${request.database}.${request.collection} (${format})`
   });
@@ -351,7 +377,8 @@ export async function importCollection(
     await collection.drop().catch(() => undefined);
   }
 
-  const tick = makeThrottledReporter(jobId, 'import', report, request.filePath);
+  const tick = makeThrottledReporter(jobId, 'import', report, request.filePath, startedAt);
+  tick({ processed: 0, total: null, bytes: 0, totalBytes: fileSize }, true);
   let processed = 0;
   let failed = 0;
   let batch: Document[] = [];
@@ -435,7 +462,9 @@ export async function importCollection(
       } else {
         for (const row of csvParser.push(text)) await handleCsvRow(row);
       }
-      tick(processed, null, `${Math.round((bytesRead / Math.max(fileSize, 1)) * 100)}% of file`);
+      // Documents flushed is not a share of anything until the file is read,
+      // so the bytes consumed are what the progress bar tracks.
+      tick({ processed, total: null, bytes: bytesRead, totalBytes: fileSize });
     }
 
     if (format === 'ndjson' && ndjsonRemainder.trim()) await handleDocumentText(ndjsonRemainder);
@@ -448,6 +477,9 @@ export async function importCollection(
       phase: 'done',
       processed,
       total: processed + failed,
+      bytes: fileSize,
+      totalBytes: fileSize,
+      startedAt,
       filePath: request.filePath,
       errors,
       message: `Imported ${processed.toLocaleString()} documents${
@@ -472,11 +504,16 @@ export async function importCollection(
       phase: isCancel ? 'cancelled' : 'error',
       processed,
       total: null,
+      bytes: bytesRead,
+      totalBytes: fileSize,
+      startedAt,
       filePath: request.filePath,
       errors,
       message: error instanceof Error ? error.message : String(error)
     });
     throw error;
+  } finally {
+    forgetCancellation(jobId);
   }
 }
 

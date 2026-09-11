@@ -212,13 +212,52 @@ function buildToolArgs(request: ToolRunRequest, uri: string): string[] {
 }
 
 const runningJobs = new Map<string, ReturnType<typeof spawn>>();
+const killedJobs = new Set<string>();
 
 export function cancelToolJob(jobId: string): boolean {
   const child = runningJobs.get(jobId);
   if (!child) return false;
+  // Remembered so the non-zero exit reads as "the user stopped it", not a failure.
+  killedJobs.add(jobId);
   child.kill();
   runningJobs.delete(jobId);
   return true;
+}
+
+interface ToolCounts {
+  processed?: number;
+  total?: number;
+  bytes?: number;
+  totalBytes?: number;
+}
+
+const BYTE_UNITS: Record<string, number> = {
+  B: 1,
+  KB: 1024,
+  MB: 1024 ** 2,
+  GB: 1024 ** 3,
+  TB: 1024 ** 4
+};
+
+/**
+ * Reads the progress the database tools print on stderr, e.g.
+ * `[####....]  shop.orders  12000/45000  (26.7%)` for mongodump/mongoexport or
+ * `12.0MB/45.0MB (26.7%)` for mongoimport. Anything else yields nothing.
+ */
+function parseToolCounts(line: string): ToolCounts {
+  const documents = line.match(/(?:^|\s)(\d+)\/(\d+)(?:\s|$)/);
+  if (documents) {
+    return { processed: Number(documents[1]), total: Number(documents[2]) };
+  }
+  const sizes = line.match(/([\d.]+)(B|KB|MB|GB|TB)\/([\d.]+)(B|KB|MB|GB|TB)/i);
+  if (sizes) {
+    const unit = (name: string) => BYTE_UNITS[name.toUpperCase()] ?? 1;
+    return {
+      bytes: Math.round(Number(sizes[1]) * unit(sizes[2])),
+      totalBytes: Math.round(Number(sizes[3]) * unit(sizes[4]))
+    };
+  }
+  return {};
 }
 
 export async function runTool(
@@ -232,7 +271,10 @@ export async function runTool(
   const args = buildToolArgs(request, uri);
   const jobId = randomUUID();
   const started = Date.now();
+  const startedAt = new Date(started).toISOString();
   const output: string[] = [];
+  // The tools only tell us how far along they are through their log lines.
+  let counted: ToolCounts = {};
 
   report({
     jobId,
@@ -240,6 +282,7 @@ export async function runTool(
     phase: 'starting',
     processed: 0,
     total: null,
+    startedAt,
     filePath: request.target,
     message: `${path.basename(executable)} ${maskUri(args)}`
   });
@@ -253,12 +296,16 @@ export async function runTool(
         const message = line.trim();
         if (!message) continue;
         output.push(message);
+        counted = { ...counted, ...parseToolCounts(message) };
         report({
           jobId,
           kind: 'tool',
           phase: 'running',
-          processed: 0,
-          total: null,
+          processed: counted.processed ?? 0,
+          total: counted.total ?? null,
+          bytes: counted.bytes,
+          totalBytes: counted.totalBytes,
+          startedAt,
           filePath: request.target,
           message
         });
@@ -275,8 +322,9 @@ export async function runTool(
         jobId,
         kind: 'tool',
         phase: 'error',
-        processed: 0,
-        total: null,
+        processed: counted.processed ?? 0,
+        total: counted.total ?? null,
+        startedAt,
         filePath: request.target,
         message: error.message
       });
@@ -285,19 +333,29 @@ export async function runTool(
 
     child.on('close', (code) => {
       runningJobs.delete(jobId);
-      const ok = code === 0;
+      const stopped = killedJobs.delete(jobId);
+      const ok = code === 0 && !stopped;
       report({
         jobId,
         kind: 'tool',
-        phase: ok ? 'done' : 'error',
-        processed: 0,
-        total: null,
+        phase: stopped ? 'cancelled' : ok ? 'done' : 'error',
+        processed: counted.processed ?? 0,
+        total: counted.total ?? null,
+        startedAt,
         filePath: request.target,
-        errors: ok ? [] : output.slice(-20),
-        message: ok
-          ? `${request.tool} finished successfully`
-          : `${request.tool} exited with code ${code}`
+        errors: ok || stopped ? [] : output.slice(-20),
+        message: stopped
+          ? `${request.tool} stopped: cancelled by user.`
+          : ok
+            ? `${request.tool} finished successfully`
+            : `${request.tool} exited with code ${code}`
       });
+      if (stopped) {
+        const error = new Error('Cancelled by user.');
+        error.name = 'CancelledError';
+        reject(error);
+        return;
+      }
       if (!ok) {
         reject(new Error(`${request.tool} exited with code ${code}:\n${output.slice(-10).join('\n')}`));
         return;

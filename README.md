@@ -84,6 +84,13 @@ Tools** (or let it auto-detect them from your `PATH`).
   `mongoexport`/`mongoimport` if you prefer them. Their output is streamed into
   the dialog's log panel.
 
+**Telling you what happened**
+- A finished operation confirms itself with a small toast in the corner that
+  fades on its own — no OS notifications, nothing to dismiss.
+- A failed one stops you with a dialog naming the operation and quoting the
+  reason underneath, because a failure you can scroll past is worse than none.
+  Even a promise nobody caught ends up there rather than only in the console.
+
 ![Settings with tool paths](docs/screenshot-settings.png)
 
 ## Requirements

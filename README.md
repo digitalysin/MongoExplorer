@@ -92,6 +92,8 @@ Tools** (or let it auto-detect them from your `PATH`).
   left behind. Close the dialog and the status bar keeps the bar, the percentage
   and the clock until the job ends.
 
+![Import in progress](docs/screenshot-import-progress.png)
+
 **Telling you what happened**
 - A finished operation confirms itself with a small toast in the corner that
   fades on its own — no OS notifications, nothing to dismiss.

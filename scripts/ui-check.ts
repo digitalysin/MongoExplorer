@@ -80,6 +80,87 @@ async function fill(window: BrowserWindow, selector: string, value: string): Pro
   `);
 }
 
+/** Dispatches a mouse event on the cell in `row` under the named column. */
+async function cellEvent(
+  window: BrowserWindow,
+  row: number,
+  column: string,
+  type: 'dblclick' | 'contextmenu'
+): Promise<{ ok: boolean; reason?: string; text?: string }> {
+  return window.webContents.executeJavaScript(`
+    (() => {
+      const headers = [...document.querySelectorAll('.data-table thead th')].map((node) => node.textContent);
+      const index = headers.indexOf(${JSON.stringify(column)});
+      if (index < 0) return { ok: false, reason: 'no ' + ${JSON.stringify(column)} + ' column in ' + headers.join(',') };
+      const tr = document.querySelectorAll('.data-table tbody tr')[${row}];
+      if (!tr) return { ok: false, reason: 'no row ${row}' };
+      const cell = tr.children[index];
+      const box = cell.getBoundingClientRect();
+      cell.dispatchEvent(new MouseEvent(${JSON.stringify(type)}, {
+        bubbles: true,
+        clientX: Math.round(box.left + 8),
+        clientY: Math.round(box.top + 8)
+      }));
+      return { ok: true, text: cell.textContent };
+    })()
+  `);
+}
+
+async function cellText(window: BrowserWindow, row: number, column: string): Promise<string> {
+  return window.webContents.executeJavaScript(`
+    (() => {
+      const headers = [...document.querySelectorAll('.data-table thead th')].map((node) => node.textContent);
+      const index = headers.indexOf(${JSON.stringify(column)});
+      const tr = document.querySelectorAll('.data-table tbody tr')[${row}];
+      return index < 0 || !tr ? '' : tr.children[index].textContent;
+    })()
+  `);
+}
+
+/** Commits an open in-place cell editor with the given text. */
+async function commitCellEditor(window: BrowserWindow, value: string): Promise<boolean> {
+  return window.webContents.executeJavaScript(`
+    (() => {
+      const input = document.querySelector('input.cell-editor');
+      if (!input) return false;
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      setter.call(input, ${JSON.stringify(value)});
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      return true;
+    })()
+  `);
+}
+
+/** The column whose cell is currently in edit mode, or '' when none is. */
+async function editingColumn(window: BrowserWindow): Promise<string> {
+  return window.webContents.executeJavaScript(`
+    (() => {
+      const cell = document.querySelector('.data-table td.is-editing');
+      if (!cell) return '';
+      const headers = [...document.querySelectorAll('.data-table thead th')].map((node) => node.textContent);
+      return headers[[...cell.parentElement.children].indexOf(cell)] ?? '';
+    })()
+  `);
+}
+
+async function keyOnEditor(window: BrowserWindow, key: string): Promise<boolean> {
+  return window.webContents.executeJavaScript(`
+    (() => {
+      const input = document.querySelector('.cell-editor');
+      if (!input) return false;
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: ${JSON.stringify(key)}, bubbles: true }));
+      return true;
+    })()
+  `);
+}
+
+async function count(window: BrowserWindow, selector: string): Promise<number> {
+  return window.webContents.executeJavaScript(
+    `document.querySelectorAll(${JSON.stringify(selector)}).length`
+  );
+}
+
 async function textOf(window: BrowserWindow, selector: string): Promise<string> {
   return window.webContents.executeJavaScript(`
     [...document.querySelectorAll(${JSON.stringify(selector)})].map((node) => node.textContent).join(' | ')
@@ -244,6 +325,137 @@ async function main(): Promise<void> {
   await click(window, '.toolbar .btn-primary');
   await wait(2000);
   await shoot(window, '09-query-results');
+
+  console.log('  editing a cell in place…');
+  const verifier = new MongoClient(`mongodb://${HOST}`);
+  await verifier.connect();
+  const orders = verifier.db(DATABASE).collection('orders');
+  const reference = (await cellText(window, 0, 'reference')).trim();
+  if (!reference) throw new Error('the first row has no reference to identify it by');
+
+  const opened = await cellEvent(window, 0, 'status', 'dblclick');
+  if (!opened.ok) throw new Error(`could not open the status cell: ${opened.reason}`);
+  await wait(300);
+  await shoot(window, '09b-cell-editing');
+  if (!(await commitCellEditor(window, 'settled'))) {
+    throw new Error('double-clicking the status cell did not open an editor');
+  }
+  await wait(1200);
+  const stored = await orders.findOne({ reference });
+  if (stored?.status !== 'settled') {
+    throw new Error(`the in-place edit did not reach mongod: status is ${String(stored?.status)}`);
+  }
+  if (!(await cellText(window, 0, 'status')).includes('settled')) {
+    throw new Error('the table still shows the old status');
+  }
+  // Patching one cell must not look like a new result and drop the cursor.
+  if ((await count(window, '.data-table td.is-selected')) !== 1) {
+    throw new Error('the edited cell lost its selection after the write');
+  }
+
+  console.log('  tabbing to the next cell…');
+  if (!(await cellEvent(window, 0, 'status', 'dblclick')).ok) {
+    throw new Error('could not reopen the status editor');
+  }
+  await wait(300);
+  await keyOnEditor(window, 'Tab');
+  await wait(600);
+  const tabbedTo = await editingColumn(window);
+  if (tabbedTo !== 'amount') {
+    throw new Error(`Tab should move the editor to amount, it went to "${tabbedTo}"`);
+  }
+  await keyOnEditor(window, 'Escape');
+  await wait(300);
+  if ((await editingColumn(window)) !== '') throw new Error('Escape did not close the editor');
+  const untouched = await orders.findOne({ reference });
+  if (untouched?.amount !== stored?.amount) {
+    throw new Error('moving through cells without typing must not write anything');
+  }
+
+  console.log('  editing numbers without changing their BSON type…');
+  const amountOf = async (order: string) => {
+    const [row] = await orders
+      .aggregate([{ $match: { reference: order } }, { $project: { type: { $type: '$amount' } } }])
+      .toArray();
+    return String(row?.type);
+  };
+  // Row 1 holds a whole number, which the driver stored as an int32; row 2 holds
+  // a fractional one, a double. A whole number typed into either must not move
+  // the field to the other type.
+  for (const [row, expected] of [
+    [0, 'int'],
+    [1, 'double']
+  ] as const) {
+    const order = (await cellText(window, row, 'reference')).trim();
+    if ((await amountOf(order)) !== expected) {
+      throw new Error(`the seed changed: ${order}.amount is not a ${expected}`);
+    }
+    if (!(await cellEvent(window, row, 'amount', 'dblclick')).ok) {
+      throw new Error(`could not open the amount editor on row ${row}`);
+    }
+    await wait(300);
+    if (!(await commitCellEditor(window, '42'))) throw new Error('the amount editor did not open');
+    await wait(1200);
+    const actual = await amountOf(order);
+    if (actual !== expected) {
+      throw new Error(`editing ${order}.amount turned a ${expected} into a ${actual}`);
+    }
+    if (!(await cellText(window, row, 'amount')).includes('42')) {
+      throw new Error(`row ${row} still shows the old amount`);
+    }
+  }
+
+  console.log('  right-clicking a row…');
+  const menuOpened = await cellEvent(window, 0, 'status', 'contextmenu');
+  if (!menuOpened.ok) throw new Error(`could not right-click the status cell: ${menuOpened.reason}`);
+  await wait(400);
+  const menu = await textOf(window, '.context-menu-item');
+  for (const label of [
+    'Edit “status”',
+    'Edit document…',
+    'Copy value',
+    'Filter by this value',
+    'Duplicate document',
+    'Delete document…'
+  ]) {
+    if (!menu.includes(label)) throw new Error(`the context menu is missing "${label}": ${menu}`);
+  }
+  await shoot(window, '09c-row-context-menu');
+  if (!(await click(window, '.context-menu-item', 'Set to null'))) {
+    throw new Error('the context menu has no "Set to null" action');
+  }
+  await wait(1200);
+  const nulled = await orders.findOne({ reference });
+  if (nulled?.status !== null) {
+    throw new Error(`"Set to null" did not write null: status is ${String(nulled?.status)}`);
+  }
+  await orders.updateOne({ reference }, { $set: { status: 'paid' } });
+  await verifier.close();
+
+  // A throwaway tab, so the screenshots below keep showing the unfiltered query.
+  console.log('  filtering by a clicked value…');
+  await click(window, '.titlebar-actions .btn', 'New query');
+  await wait(600);
+  await click(window, '.toolbar .btn-primary');
+  await wait(2000);
+  if (!(await cellEvent(window, 1, 'status', 'contextmenu')).ok) {
+    throw new Error('could not right-click the second row');
+  }
+  await wait(400);
+  if (!(await click(window, '.context-menu-item', 'Filter by this value'))) {
+    throw new Error('the context menu has no "Filter by this value" action');
+  }
+  await wait(2000);
+  const filteredCode = await textOf(window, '.cm-content');
+  if (!filteredCode.includes('find({ status: "pending" })')) {
+    throw new Error(`the filter was not written into the editor: ${filteredCode}`);
+  }
+  if (!(await cellText(window, 0, 'status')).includes('pending')) {
+    throw new Error('the filtered result still holds other statuses');
+  }
+  await shoot(window, '09d-filtered-by-value');
+  await click(window, '.tab.is-active .tab-close');
+  await wait(500);
 
   console.log('  switching the result to JSON…');
   await click(window, '.segmented button', 'JSON');

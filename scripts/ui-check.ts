@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { MongoClient } from 'mongodb';
-import { registerIpcHandlers } from '../electron/ipc.js';
+import { PROGRESS_CHANNEL, registerIpcHandlers } from '../electron/ipc.js';
 import { upsertConnection } from '../electron/services/connections.js';
 
 const HOST = '127.0.0.1:27099';
@@ -71,6 +71,24 @@ async function fill(window: BrowserWindow, selector: string, value: string): Pro
   return window.webContents.executeJavaScript(`
     (() => {
       const input = document.querySelector(${JSON.stringify(selector)});
+      if (!input) return false;
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      setter.call(input, ${JSON.stringify(value)});
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      return true;
+    })()
+  `);
+}
+
+/** Types into the input of the `.field` whose label matches, by going through
+ *  the native value setter so React sees the change. */
+async function fillField(window: BrowserWindow, label: string, value: string): Promise<boolean> {
+  return window.webContents.executeJavaScript(`
+    (() => {
+      const field = [...document.querySelectorAll('.modal .field')].find(
+        (node) => node.querySelector('.field-label')?.textContent === ${JSON.stringify(label)}
+      );
+      const input = field?.querySelector('input.input');
       if (!input) return false;
       const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
       setter.call(input, ${JSON.stringify(value)});
@@ -165,6 +183,18 @@ async function textOf(window: BrowserWindow, selector: string): Promise<string> 
   return window.webContents.executeJavaScript(`
     [...document.querySelectorAll(${JSON.stringify(selector)})].map((node) => node.textContent).join(' | ')
   `);
+}
+
+/** Writes an NDJSON file big enough that importing it cannot finish instantly. */
+async function writeBigNdjson(filePath: string, documents: number): Promise<void> {
+  const stream = fs.createWriteStream(filePath);
+  for (let index = 0; index < documents; index += 1) {
+    const line = `${JSON.stringify({ index, label: `row-${index}`, note: 'x'.repeat(80) })}\n`;
+    if (!stream.write(line)) {
+      await new Promise<void>((resolve) => stream.once('drain', () => resolve()));
+    }
+  }
+  await new Promise<void>((resolve) => stream.end(resolve));
 }
 
 async function shoot(window: BrowserWindow, name: string): Promise<void> {
@@ -523,6 +553,93 @@ async function main(): Promise<void> {
   await click(window, '.titlebar-actions .btn', 'Export');
   await wait(600);
   await shoot(window, '15-export');
+
+  console.log('  running an export through the dialog…');
+  const exportPath = path.join(workDir, 'orders-export.ndjson');
+  await fill(window, '.modal .form-grid .row .input', exportPath);
+  await click(window, '.modal-footer .btn', 'Export');
+  await wait(2500);
+  const exportSummary = await textOf(window, '.modal .badge');
+  if (!/Exported 250 documents/.test(exportSummary)) {
+    throw new Error(`the export did not report its result: ${exportSummary}`);
+  }
+  if (!fs.existsSync(exportPath)) throw new Error('the export wrote no file');
+  await shoot(window, '15b-export-done');
+  await click(window, '.modal-footer .btn', 'Close');
+  await wait(300);
+
+  console.log('  checking the running-transfer indicator…');
+  const startedAt = new Date(Date.now() - 20_000).toISOString();
+  window.webContents.send(PROGRESS_CHANNEL, {
+    jobId: 'ui-check-job',
+    kind: 'export',
+    phase: 'running',
+    processed: 4000,
+    total: 16_000,
+    bytes: 2_500_000,
+    startedAt,
+    filePath: exportPath,
+    message: 'Exporting mongo_explorer_ui.orders'
+  });
+  await wait(400);
+  const indicator = await textOf(window, '.status-right .transfer-status');
+  for (const fragment of ['Export', '25%', '0:20', '1:00 left']) {
+    if (!indicator.includes(fragment)) {
+      throw new Error(`the status bar should mention ${fragment}, saw: ${indicator}`);
+    }
+  }
+  const barWidth = await window.webContents.executeJavaScript(
+    `document.querySelector('.status-right .transfer-status .progress > span').style.width`
+  );
+  if (barWidth !== '25%') throw new Error(`the bar should be a quarter full, saw ${barWidth}`);
+  await shoot(window, '15c-transfer-progress');
+  window.webContents.send(PROGRESS_CHANNEL, {
+    jobId: 'ui-check-job',
+    kind: 'export',
+    phase: 'done',
+    processed: 16_000,
+    total: 16_000,
+    startedAt,
+    filePath: exportPath
+  });
+  await wait(300);
+
+  console.log('  watching a long import and stopping it…');
+  const bigFile = path.join(workDir, 'big.ndjson');
+  await writeBigNdjson(bigFile, 600_000);
+
+  await click(window, '.titlebar-actions .btn', 'Import');
+  await wait(600);
+  await fillField(window, 'Source file', bigFile);
+  await fillField(window, 'Target collection', 'ui_check_import');
+  await click(window, '.modal-footer .btn', 'Import');
+
+  // Wait for the counts to appear rather than for a fixed moment in the job.
+  let panel = '';
+  for (let attempt = 0; attempt < 25 && !panel.includes('documents'); attempt += 1) {
+    await wait(100);
+    panel = await textOf(window, '.modal .transfer-progress');
+  }
+  for (const fragment of ['%', 'elapsed', 'documents', 'Stop']) {
+    if (!panel.includes(fragment)) {
+      throw new Error(`the progress panel should mention ${fragment}, saw: ${panel}`);
+    }
+  }
+  await shoot(window, '15d-import-progress');
+
+  console.log('  stopping it…');
+  if (!(await click(window, '.transfer-progress .btn', 'Stop'))) {
+    throw new Error('the progress panel offered no way to stop the job');
+  }
+  await wait(2500);
+  const stopped = await textOf(window, '.modal .badge');
+  if (!/Stopped before it finished/.test(stopped)) {
+    throw new Error(`stopping should say what it left behind, saw: ${stopped}`);
+  }
+  if ((await count(window, '.modal .transfer-progress')) !== 0) {
+    throw new Error('the progress panel should disappear once the job is over');
+  }
+  await shoot(window, '15e-import-stopped');
   await click(window, '.modal-footer .btn', 'Close');
   await wait(300);
 

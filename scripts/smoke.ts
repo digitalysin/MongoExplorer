@@ -8,6 +8,7 @@
  */
 import { app } from 'electron';
 import assert from 'node:assert/strict';
+import type { TransferProgress } from '../shared/types.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -39,7 +40,8 @@ import {
   removeSavedQuery,
   saveQuery
 } from '../electron/services/library.js';
-import { exportCollection, importCollection } from '../electron/services/transfer.js';
+import { cancelJob, exportCollection, importCollection } from '../electron/services/transfer.js';
+import { summarizeTransfer } from '../src/lib/transferProgress.js';
 import { detectTools, runTool } from '../electron/services/tools.js';
 import { encryptionAvailable, getSecrets, setSecrets } from '../electron/services/store.js';
 
@@ -759,6 +761,174 @@ async function main(): Promise<void> {
     );
     assert.equal(exported.processed, 5000);
     assert.equal(JSON.parse(fs.readFileSync(roundTrip, 'utf8')).length, 5000);
+  });
+
+  await check('export progress carries a total, bytes and a start time', async () => {
+    const events: TransferProgress[] = [];
+    const target = path.join(workDir, 'progress.ndjson');
+    const result = await exportCollection(
+      {
+        connectionId: connection.id,
+        database: DATABASE,
+        collection: 'bulk',
+        format: 'ndjson',
+        filePath: target
+      },
+      (event) => events.push(event)
+    );
+
+    assert.equal(result.processed, 5000);
+    assert.equal(events[0]?.phase, 'starting');
+    assert.ok(
+      Number.isFinite(Date.parse(events[0]!.startedAt)),
+      'every event should say when the job began'
+    );
+
+    const running = events.filter((event) => event.phase === 'running');
+    assert.ok(running.length > 0, 'expected at least one running event');
+    assert.ok(
+      running.every((event) => event.total === 5000),
+      `every running total should be 5000, saw ${running.map((event) => event.total).join(',')}`
+    );
+
+    const last = events.at(-1)!;
+    assert.equal(last.phase, 'done');
+    assert.equal(last.processed, 5000);
+    assert.ok((last.bytes ?? 0) > 0, 'the finished export should report its file size');
+  });
+
+  await check('export progress totals account for skip and limit', async () => {
+    const events: TransferProgress[] = [];
+    await exportCollection(
+      {
+        connectionId: connection.id,
+        database: DATABASE,
+        collection: 'bulk',
+        format: 'ndjson',
+        filePath: path.join(workDir, 'progress-window.ndjson'),
+        skip: 4900,
+        limit: 50
+      },
+      (event) => events.push(event)
+    );
+    const totals = events
+      .filter((event) => event.phase === 'running')
+      .map((event) => event.total);
+    assert.ok(totals.length > 0, 'expected a running event carrying the total');
+    assert.ok(
+      totals.every((total) => total === 50),
+      `the window is 50 documents, saw ${totals.join(',')}`
+    );
+  });
+
+  await check('import progress measures the file it is reading', async () => {
+    const events: TransferProgress[] = [];
+    const source = path.join(workDir, 'bulk.ndjson');
+    await importCollection(
+      {
+        connectionId: connection.id,
+        database: DATABASE,
+        collection: 'progress_import',
+        format: 'ndjson',
+        filePath: source,
+        mode: 'insert'
+      },
+      (event) => events.push(event)
+    );
+    const size = fs.statSync(source).size;
+    const running = events.filter((event) => event.phase === 'running');
+    assert.ok(running.length > 0, 'expected at least one running event');
+    assert.ok(
+      running.every((event) => event.totalBytes === size),
+      'the total should be the size of the source file'
+    );
+    assert.equal(events.at(-1)?.bytes, size, 'a finished import has read the whole file');
+  });
+
+  await check('a cancelled export stops without poisoning the next one', async () => {
+    const target = path.join(workDir, 'cancelled.ndjson');
+    await assert.rejects(
+      exportCollection(
+        {
+          connectionId: connection.id,
+          database: DATABASE,
+          collection: 'bulk',
+          format: 'ndjson',
+          filePath: target
+        },
+        (event) => {
+          if (event.phase === 'running') cancelJob(event.jobId);
+        }
+      ),
+      /Cancelled by user/
+    );
+
+    const again = await exportCollection(
+      {
+        connectionId: connection.id,
+        database: DATABASE,
+        collection: 'bulk',
+        format: 'ndjson',
+        filePath: path.join(workDir, 'after-cancel.ndjson')
+      },
+      silent
+    );
+    assert.equal(again.processed, 5000, 'a stale cancellation must not stop the next job');
+  });
+
+  await check('progress summaries report percent, rate and time left', async () => {
+    const startedAt = new Date(0).toISOString();
+    const half = summarizeTransfer(
+      {
+        jobId: 'job',
+        kind: 'export',
+        phase: 'running',
+        processed: 500,
+        total: 1000,
+        bytes: 2048,
+        startedAt
+      },
+      10_000
+    );
+    assert.equal(half.percentLabel, '50%');
+    assert.equal(half.fraction, 0.5);
+    assert.equal(half.countLabel, '500 / 1,000 documents');
+    assert.equal(half.elapsedLabel, '0:10');
+    assert.equal(half.remainingLabel, '0:10', 'half done in ten seconds means ten to go');
+    assert.equal(half.rateLabel, '50 docs/s');
+
+    const byBytes = summarizeTransfer(
+      {
+        jobId: 'job',
+        kind: 'import',
+        phase: 'running',
+        processed: 120,
+        total: null,
+        bytes: 250,
+        totalBytes: 1000,
+        startedAt
+      },
+      60_000
+    );
+    assert.equal(byBytes.percentLabel, '25%', 'an import is measured by its file');
+    assert.equal(byBytes.elapsedLabel, '1:00');
+    assert.equal(byBytes.remainingLabel, '3:00');
+
+    const unknown = summarizeTransfer(
+      {
+        jobId: 'job',
+        kind: 'tool',
+        phase: 'running',
+        processed: 0,
+        total: null,
+        startedAt
+      },
+      3_600_000
+    );
+    assert.equal(unknown.fraction, null, 'nothing countable means an open-ended bar');
+    assert.equal(unknown.percentLabel, null);
+    assert.equal(unknown.remainingLabel, null);
+    assert.equal(unknown.elapsedLabel, '1:00:00');
   });
 
   // --- optional external tools --------------------------------------------

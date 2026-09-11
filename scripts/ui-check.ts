@@ -189,7 +189,7 @@ async function textOf(window: BrowserWindow, selector: string): Promise<string> 
 async function writeBigNdjson(filePath: string, documents: number): Promise<void> {
   const stream = fs.createWriteStream(filePath);
   for (let index = 0; index < documents; index += 1) {
-    const line = `${JSON.stringify({ index, label: `row-${index}`, note: 'x'.repeat(80) })}\n`;
+    const line = `${JSON.stringify({ index, label: `row-${index}`, note: 'x'.repeat(40) })}\n`;
     if (!stream.write(line)) {
       await new Promise<void>((resolve) => stream.once('drain', () => resolve()));
     }
@@ -606,12 +606,15 @@ async function main(): Promise<void> {
 
   console.log('  watching a long import and stopping it…');
   const bigFile = path.join(workDir, 'big.ndjson');
-  await writeBigNdjson(bigFile, 600_000);
+  await writeBigNdjson(bigFile, 1_000_000);
 
   await click(window, '.titlebar-actions .btn', 'Import');
   await wait(600);
   await fillField(window, 'Source file', bigFile);
   await fillField(window, 'Target collection', 'ui_check_import');
+  // A small batch keeps the job on screen long enough to read; it is stopped
+  // a couple of seconds in either way.
+  await fillField(window, 'Batch size', '25');
   await click(window, '.modal-footer .btn', 'Import');
 
   // Wait for the counts to appear rather than for a fixed moment in the job.
@@ -623,6 +626,17 @@ async function main(): Promise<void> {
   for (const fragment of ['%', 'elapsed', 'documents', 'Stop']) {
     if (!panel.includes(fragment)) {
       throw new Error(`the progress panel should mention ${fragment}, saw: ${panel}`);
+    }
+  }
+
+  // The estimate only appears once there is enough progress to justify it.
+  for (let attempt = 0; attempt < 40 && !panel.includes('about '); attempt += 1) {
+    await wait(100);
+    panel = await textOf(window, '.modal .transfer-progress');
+  }
+  for (const fragment of ['about ', 'left', 'docs/s']) {
+    if (!panel.includes(fragment)) {
+      throw new Error(`the panel should settle into an estimate, saw: ${panel}`);
     }
   }
   await shoot(window, '15d-import-progress');

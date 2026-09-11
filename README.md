@@ -31,8 +31,8 @@ Tools** (or let it auto-detect them from your `PATH`).
   helpers such as `ObjectId()`, `ISODate()`, `NumberDecimal()` and `UUID()`
   (with or without `new`).
 - Multi-statement scripts with `await` and an explicit `return`.
-- Results as a typed table (double-click a cell or row to inspect the document)
-  or as raw extended JSON, plus `Explain` for the execution plan.
+- Results as a typed table (double-click a nested value to inspect it) or as raw
+  extended JSON, plus `Explain` for the execution plan.
 - Row limit per tab, with a clear badge when the result was truncated.
 - Every run is recorded in a searchable history (consecutive identical runs
   collapse into one), and any query can be saved under a name and reopened
@@ -42,9 +42,17 @@ Tools** (or let it auto-detect them from your `PATH`).
 
 ![Document editor](docs/screenshot-document-editor.png)
 
-- Edit a document straight from the result table: click the row number to open
-  it in canonical extended JSON, so an edit round-trip cannot turn an `int64`
-  into a double. Changing `_id` is refused rather than silently ignored.
+- Edit a cell in place: double-click it (or select it and press Enter), type, and
+  press Enter to write just that field with `$set`. Tab moves to the next cell,
+  Escape cancels. The field keeps the BSON type it already had — a whole number
+  typed into a `double` stays a double, an `ObjectId` stays an `ObjectId` — and
+  only the edited cell repaints, so the query is not re-run.
+- Right-click a row for the rest: edit the document as JSON, view or copy it,
+  copy a value or the `_id`, filter the query by the clicked value, set a field
+  to null or unset it, duplicate the document, or delete it.
+- Edit a whole document from the result table: click the row number to open it in
+  canonical extended JSON, so an edit round-trip cannot turn an `int64` into a
+  double. Changing `_id` is refused rather than silently ignored.
 - Insert new documents into the current collection and delete existing ones.
 - Create indexes with keys, name, uniqueness, sparseness, TTL, a partial filter
   expression and a collation; drop any index except `_id_`.

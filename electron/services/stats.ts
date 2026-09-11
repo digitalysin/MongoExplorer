@@ -1,8 +1,12 @@
-import type {
-  CreateIndexesOptions,
-  Db,
-  Document,
-  IndexSpecification
+import {
+  Decimal128,
+  Double,
+  Int32,
+  Long,
+  type CreateIndexesOptions,
+  type Db,
+  type Document,
+  type IndexSpecification
 } from 'mongodb';
 import type {
   CollectionStats,
@@ -370,6 +374,63 @@ export async function deleteDocument(ref: DocumentRef): Promise<void> {
   if (result.deletedCount === 0) throw new Error('That document no longer exists.');
 }
 
+/**
+ * Writes a single field, which is what in-place editing in the result table
+ * needs. The value arrives as canonical EJSON so BSON wrappers survive the trip,
+ * and a plain number is re-wrapped in whatever numeric type the field already
+ * holds — otherwise editing an int32 cell would silently widen it to a double.
+ * Returns the stored value as relaxed EJSON so the table can repaint one cell
+ * instead of re-running the query.
+ */
+export async function setDocumentField(
+  ref: DocumentRef,
+  field: string,
+  valueJson: string
+): Promise<{ value: unknown }> {
+  assertEditableField(field);
+  const id = parseId(ref.idJson);
+  const collection = getDb(ref.connectionId, ref.database).collection(ref.collection);
+  // `$type` is the only reliable answer to "what is stored here?" — the driver
+  // hands back int32 and double as the same JS number.
+  const [current] = await collection
+    .aggregate([{ $match: { _id: id } }, { $project: { type: { $type: `$${field}` } } }])
+    .toArray();
+  if (!current) throw new Error('That document no longer exists.');
+
+  const value = keepNumericType(parseValue(valueJson), String(current.type));
+  const result = await collection.updateOne({ _id: id } as Document, { $set: { [field]: value } });
+  if (result.matchedCount === 0) throw new Error('That document no longer exists.');
+  return { value: serializeValue(value) };
+}
+
+export async function unsetDocumentField(ref: DocumentRef, field: string): Promise<void> {
+  assertEditableField(field);
+  const result = await getDb(ref.connectionId, ref.database)
+    .collection(ref.collection)
+    .updateOne({ _id: parseId(ref.idJson) } as Document, { $unset: { [field]: '' } });
+  if (result.matchedCount === 0) throw new Error('That document no longer exists.');
+}
+
+/** Inserts a copy of the document; the copy gets a freshly generated `_id`. */
+export async function duplicateDocument(ref: DocumentRef): Promise<{ insertedId: unknown }> {
+  const collection = getDb(ref.connectionId, ref.database).collection(ref.collection);
+  const document = await collection.findOne({ _id: parseId(ref.idJson) } as Document);
+  if (!document) throw new Error('That document no longer exists.');
+  delete (document as Record<string, unknown>)._id;
+  const result = await collection.insertOne(document);
+  return { insertedId: serializeValue(result.insertedId) };
+}
+
+function assertEditableField(field: string): void {
+  if (!field) throw new Error('No field was given.');
+  if (field === '_id') throw new Error('The _id of an existing document cannot be changed.');
+  if (field.startsWith('$') || field.includes('.') || field.includes('\0')) {
+    throw new Error(
+      `The field "${field}" cannot be written on its own — edit the whole document as JSON instead.`
+    );
+  }
+}
+
 function parseDocument(json: string): Document {
   try {
     const parsed = EJSON.parse(json, { relaxed: false });
@@ -392,4 +453,48 @@ function parseId(idJson: string): unknown {
 
 function idsEqual(left: unknown, right: unknown): boolean {
   return EJSON.stringify(left, { relaxed: false }) === EJSON.stringify(right, { relaxed: false });
+}
+
+/** Parses one canonical-EJSON value. Wrapping it keeps bare scalars legal. */
+function parseValue(valueJson: string): unknown {
+  try {
+    const { v } = EJSON.parse(`{"v":${valueJson}}`, { relaxed: false }) as { v: unknown };
+    return v;
+  } catch (error) {
+    throw new Error(`Invalid value: ${(error as Error).message}`);
+  }
+}
+
+function serializeValue(value: unknown): unknown {
+  const { v } = EJSON.serialize({ v: value }, { relaxed: true }) as { v: unknown };
+  return v;
+}
+
+/** The decimal text of a number in any BSON numeric type, else null. */
+function numericText(value: unknown): string | null {
+  if (typeof value === 'number') return Number.isFinite(value) ? String(value) : null;
+  if (value instanceof Int32 || value instanceof Double) return String(value.value);
+  if (value instanceof Long || value instanceof Decimal128) return value.toString();
+  return null;
+}
+
+/**
+ * Re-wraps a numeric edit in the type the field already stored, named by the
+ * server's `$type`. Anything else — a non-numeric value, a fraction typed into
+ * an integer field, a field that did not exist — is left as parsed.
+ */
+function keepNumericType(next: unknown, bsonType: string): unknown {
+  const text = numericText(next);
+  if (text === null) return next;
+  const integral = /^[+-]?\d+$/.test(text);
+
+  if (bsonType === 'decimal') return Decimal128.fromString(text);
+  if (bsonType === 'double') return new Double(Number(text));
+  if (bsonType === 'long' && integral) return Long.fromString(text);
+  if (bsonType === 'int' && integral) {
+    const value = Number(text);
+    const fitsInt32 = value >= -2_147_483_648 && value <= 2_147_483_647;
+    return fitsInt32 ? new Int32(value) : Long.fromString(text);
+  }
+  return next;
 }

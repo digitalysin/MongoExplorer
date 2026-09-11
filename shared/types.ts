@@ -417,6 +417,20 @@ export interface RendererApi {
       documentJson: string
     ): Promise<Result<{ insertedId: unknown }>>;
     deleteDocument(ref: DocumentRef): Promise<Result<null>>;
+    /**
+     * Writes one field with `$set` — the write behind in-place table editing.
+     * `valueJson` is canonical EJSON; the stored value comes back as relaxed
+     * EJSON so the table can repaint a single cell.
+     */
+    setDocumentField(
+      ref: DocumentRef,
+      field: string,
+      valueJson: string
+    ): Promise<Result<{ value: unknown }>>;
+    /** Removes one field with `$unset`. */
+    unsetDocumentField(ref: DocumentRef, field: string): Promise<Result<null>>;
+    /** Inserts a copy of the document under a fresh `_id`. */
+    duplicateDocument(ref: DocumentRef): Promise<Result<{ insertedId: unknown }>>;
   };
   query: {
     run(request: QueryRequest): Promise<Result<QueryResult>>;
@@ -459,6 +473,7 @@ export interface RendererApi {
   app: {
     version(): Promise<Result<{ app: string; electron: string; node: string; driver: string }>>;
     openExternal(url: string): Promise<Result<null>>;
+    copyToClipboard(text: string): Promise<Result<null>>;
     /** Fires when File ▸ New Query Tab is chosen. Returns an unsubscribe function. */
     onNewTab(handler: () => void): () => void;
   };

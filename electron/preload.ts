@@ -75,7 +75,12 @@ const api: RendererApi = {
       collection: string,
       documentJson: string
     ) => invoke('data:insertDocument', connectionId, database, collection, documentJson),
-    deleteDocument: (ref: DocumentRef) => invoke('data:deleteDocument', ref)
+    deleteDocument: (ref: DocumentRef) => invoke('data:deleteDocument', ref),
+    setDocumentField: (ref: DocumentRef, field: string, valueJson: string) =>
+      invoke('data:setDocumentField', ref, field, valueJson),
+    unsetDocumentField: (ref: DocumentRef, field: string) =>
+      invoke('data:unsetDocumentField', ref, field),
+    duplicateDocument: (ref: DocumentRef) => invoke('data:duplicateDocument', ref)
   },
   query: {
     run: (request: QueryRequest) => invoke('query:run', request)
@@ -114,6 +119,7 @@ const api: RendererApi = {
   app: {
     version: () => invoke('app:version'),
     openExternal: (url: string) => invoke('app:openExternal', url),
+    copyToClipboard: (text: string) => invoke('app:copyToClipboard', text),
     onNewTab: (handler: () => void) => {
       const listener = () => handler();
       ipcRenderer.on('menu:new-tab', listener);

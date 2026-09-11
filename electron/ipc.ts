@@ -1,4 +1,4 @@
-import { BrowserWindow, app, dialog, ipcMain, shell } from 'electron';
+import { BrowserWindow, app, clipboard, dialog, ipcMain, shell } from 'electron';
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import type {
@@ -41,12 +41,15 @@ import {
   dropCollection,
   dropDatabase,
   dropIndex,
+  duplicateDocument,
   getDocument,
   indexesFor,
   insertDocument,
   listCollections,
   listDatabases,
-  replaceDocument
+  replaceDocument,
+  setDocumentField,
+  unsetDocumentField
 } from './services/stats.js';
 import {
   clearHistory,
@@ -225,6 +228,14 @@ export function registerIpcHandlers(): void {
     await deleteDocument(ref);
     return null;
   });
+  handle('data:setDocumentField', (ref: DocumentRef, field: string, valueJson: string) =>
+    setDocumentField(ref, field, valueJson)
+  );
+  handle('data:unsetDocumentField', async (ref: DocumentRef, field: string) => {
+    await unsetDocumentField(ref, field);
+    return null;
+  });
+  handle('data:duplicateDocument', (ref: DocumentRef) => duplicateDocument(ref));
 
   handle('query:run', async (request: QueryRequest) => {
     const connectionName = listConnections().find((c) => c.id === request.connectionId)?.name ?? '';
@@ -335,6 +346,12 @@ export function registerIpcHandlers(): void {
     node: process.versions.node,
     driver: driverVersion()
   }));
+
+  // The renderer runs from file://, where the async clipboard API is unavailable.
+  handle('app:copyToClipboard', (text: string) => {
+    clipboard.writeText(text);
+    return null;
+  });
 
   handle('app:openExternal', async (url: string) => {
     if (!/^https?:\/\//i.test(url)) throw new Error('Only http(s) links can be opened.');

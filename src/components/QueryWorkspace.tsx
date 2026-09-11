@@ -40,14 +40,15 @@ export function QueryWorkspace({
   const databases = store.databases[tab.connectionId] ?? [];
 
   const run = useCallback(
-    async (explain: 'executionStats' | null = null) => {
+    async (explain: 'executionStats' | null = null, code?: string) => {
       onPatch({ running: true, error: null });
       try {
         const result = await unwrap(
           api.query.run({
             connectionId: tab.connectionId,
             database: tab.database,
-            code: tab.code,
+            // A freshly written query runs before the patched tab state arrives.
+            code: code ?? tab.code,
             limit: tab.limit,
             explain
           })
@@ -79,6 +80,60 @@ export function QueryWorkspace({
   }, []);
 
   const dark = (document.documentElement.dataset.theme ?? 'dark') === 'dark';
+
+  /**
+   * In-place edits are confirmed by the server one field at a time, so the row
+   * on screen is patched instead of re-running the whole query.
+   */
+  const patchRow = (rowIndex: number, field: string, value: unknown) => {
+    const result = tab.result;
+    if (!result) return;
+    const documents = result.documents.map((document, index) => {
+      if (index !== rowIndex) return document;
+      const next = { ...(document as Record<string, unknown>) };
+      if (value === undefined) delete next[field];
+      else next[field] = value;
+      return next;
+    });
+    const columns = result.columns.includes(field) ? result.columns : [...result.columns, field];
+    onPatch({ result: { ...result, documents, columns } });
+  };
+
+  const removeRow = (rowIndex: number) => {
+    const result = tab.result;
+    if (!result) return;
+    const documents = result.documents.filter((_, index) => index !== rowIndex);
+    onPatch({ result: { ...result, documents, totalReturned: documents.length } });
+  };
+
+  const filterByValue = (field: string, literal: string) => {
+    const collection = tab.result?.collection ?? tab.collection;
+    if (!collection) return;
+    const key = /^[A-Za-z_$][\w$]*$/.test(field) ? field : JSON.stringify(field);
+    const code = `db.getCollection("${collection}").find({ ${key}: ${literal} })`;
+    onPatch({ code });
+    void run(null, code);
+  };
+
+  const editContext =
+    tab.result?.collection && tab.result.kind === 'documents'
+      ? {
+          connectionId: tab.connectionId,
+          database: tab.result.database ?? tab.database,
+          collection: tab.result.collection,
+          onOpenDocument: (idJson: string) =>
+            setEditing({
+              connectionId: tab.connectionId,
+              database: tab.result?.database ?? tab.database,
+              collection: tab.result?.collection as string,
+              idJson
+            }),
+          onRowPatch: patchRow,
+          onRowRemoved: removeRow,
+          onFilterByValue: filterByValue,
+          onRefresh: () => void run()
+        }
+      : undefined;
 
   return (
     <div className="workspace">
@@ -194,6 +249,11 @@ export function QueryWorkspace({
                 <Badge tone="amber">Truncated at the limit — raise it to see more</Badge>
               ) : null}
               {tab.result.explain ? <Badge tone="blue">Explain plan</Badge> : null}
+              {editContext && mode === 'table' ? (
+                <span className="faint">
+                  Double-click a cell to edit it · right-click a row for more
+                </span>
+              ) : null}
             </>
           ) : (
             <span className="faint">
@@ -206,21 +266,7 @@ export function QueryWorkspace({
         <div className="result-body">
           {tab.error ? <div className="error-box">{tab.error}</div> : null}
           {!tab.error && tab.result ? (
-            <ResultView
-              result={tab.result}
-              mode={mode}
-              onEditDocument={
-                tab.result.collection
-                  ? (idJson) =>
-                      setEditing({
-                        connectionId: tab.connectionId,
-                        database: tab.result?.database ?? tab.database,
-                        collection: tab.result?.collection as string,
-                        idJson
-                      })
-                  : undefined
-              }
-            />
+            <ResultView result={tab.result} mode={mode} edit={editContext} />
           ) : null}
           {!tab.error && !tab.result ? (
             <EmptyState

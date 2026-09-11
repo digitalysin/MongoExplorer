@@ -80,6 +80,31 @@ export function describeBson(record: Record<string, unknown>): string | null {
   return null;
 }
 
+/**
+ * Renders a relaxed-EJSON value as a literal that can be pasted into the query
+ * editor, or null for values no shell literal can express (binary, timestamps).
+ */
+export function shellLiteral(value: unknown): string | null {
+  if (value === null) return 'null';
+  if (typeof value === 'string') return JSON.stringify(value);
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (value === undefined) return null;
+  if (Array.isArray(value)) return JSON.stringify(value);
+
+  const record = value as Record<string, unknown>;
+  if (typeof record.$oid === 'string') return `ObjectId("${record.$oid}")`;
+  if (record.$date !== undefined) return describeBson(record);
+  if (record.$numberLong !== undefined) return `NumberLong("${String(record.$numberLong)}")`;
+  if (record.$numberDecimal !== undefined) {
+    return `NumberDecimal("${String(record.$numberDecimal)}")`;
+  }
+  if (record.$numberInt !== undefined || record.$numberDouble !== undefined) {
+    return describeBson(record);
+  }
+  if (describeBson(record) !== null) return null;
+  return JSON.stringify(value);
+}
+
 export function valueType(value: unknown): string {
   if (value === null) return 'null';
   if (Array.isArray(value)) return 'array';

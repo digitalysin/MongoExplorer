@@ -1,5 +1,5 @@
 import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode, SelectHTMLAttributes } from 'react';
-import { useEffect } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 
 interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: 'primary' | 'default' | 'ghost' | 'danger';
@@ -151,6 +151,97 @@ export function StatTile({
       <span className="stat-label">{label}</span>
       <span className="stat-value">{value}</span>
       {sub ? <span className="stat-sub">{sub}</span> : null}
+    </div>
+  );
+}
+
+export interface MenuItem {
+  /** A divider; every other field is ignored. */
+  separator?: boolean;
+  label?: ReactNode;
+  /** Shortcut or type shown right-aligned. */
+  hint?: string;
+  onSelect?: () => void;
+  disabled?: boolean;
+  danger?: boolean;
+}
+
+/**
+ * A right-click menu anchored to the pointer. It closes on the next click,
+ * Escape, scroll or resize — anything that would leave it pointing at a row
+ * that has moved.
+ */
+export function ContextMenu({
+  x,
+  y,
+  items,
+  onClose
+}: {
+  x: number;
+  y: number;
+  items: MenuItem[];
+  onClose: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [position, setPosition] = useState({ x, y, measured: false });
+
+  // Measure first, then nudge the menu back inside the window.
+  useLayoutEffect(() => {
+    const node = ref.current;
+    if (!node) return;
+    const { width, height } = node.getBoundingClientRect();
+    setPosition({
+      x: Math.max(6, Math.min(x, window.innerWidth - width - 6)),
+      y: Math.max(6, Math.min(y, window.innerHeight - height - 6)),
+      measured: true
+    });
+  }, [x, y]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose();
+    };
+    window.addEventListener('mousedown', onClose);
+    window.addEventListener('resize', onClose);
+    window.addEventListener('wheel', onClose, { passive: true });
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('mousedown', onClose);
+      window.removeEventListener('resize', onClose);
+      window.removeEventListener('wheel', onClose);
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [onClose]);
+
+  return (
+    <div
+      ref={ref}
+      className="context-menu"
+      role="menu"
+      style={{ left: position.x, top: position.y, visibility: position.measured ? 'visible' : 'hidden' }}
+      onMouseDown={(event) => event.stopPropagation()}
+      onContextMenu={(event) => event.preventDefault()}
+    >
+      {items.map((item, index) =>
+        item.separator ? (
+          <div key={`separator-${index}`} className="context-menu-separator" />
+        ) : (
+          <button
+            key={`item-${index}`}
+            type="button"
+            role="menuitem"
+            className={`context-menu-item ${item.danger ? 'is-danger' : ''}`}
+            disabled={item.disabled}
+            onClick={() => {
+              onClose();
+              item.onSelect?.();
+            }}
+          >
+            <span className="context-menu-label">{item.label}</span>
+            {item.hint ? <span className="context-menu-hint">{item.hint}</span> : null}
+          </button>
+        )
+      )}
     </div>
   );
 }

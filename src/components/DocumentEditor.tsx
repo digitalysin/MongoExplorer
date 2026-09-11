@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { DocumentRef } from '../../shared/types';
 import { api, errorMessage, unwrap } from '../lib/api';
+import { useStore } from '../state/store';
 import { Badge, Button, Modal, Spinner } from './ui';
 
 export interface DocumentEditorTarget {
@@ -26,6 +27,7 @@ export function DocumentEditor({
   onClose: () => void;
   onChanged: () => void;
 }) {
+  const store = useStore();
   const isNew = !target.idJson;
   const [text, setText] = useState(isNew ? NEW_DOCUMENT_TEMPLATE : '');
   const [loading, setLoading] = useState(!isNew);
@@ -62,10 +64,12 @@ export function DocumentEditor({
     try {
       if (ref) {
         await unwrap(api.data.replaceDocument(ref, text));
+        store.notify(`Saved the document in ${target.collection}`);
       } else {
         await unwrap(
           api.data.insertDocument(target.connectionId, target.database, target.collection, text)
         );
+        store.notify(`Inserted a document into ${target.collection}`);
       }
       onChanged();
       onClose();
@@ -82,6 +86,7 @@ export function DocumentEditor({
     setError(null);
     try {
       await unwrap(api.data.deleteDocument(ref));
+      store.notify('Deleted the document');
       onChanged();
       onClose();
     } catch (caught) {

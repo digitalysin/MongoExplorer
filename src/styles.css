@@ -1050,9 +1050,6 @@ textarea.input {
 .toast.kind-success {
   border-left-color: var(--accent);
 }
-.toast.kind-error {
-  border-left-color: var(--danger);
-}
 
 .toast .toast-detail {
   color: var(--text-dim);

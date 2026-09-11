@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from 'react';
 import type { DocumentRef, QueryResult } from '../../shared/types';
-import { api, errorMessage, unwrap } from '../lib/api';
+import { api, unwrap } from '../lib/api';
 import { cellEditHint, cellEditor, cellValueJson, type CellEditKind } from '../lib/cellEdit';
 import { formatCellValue, prettyJson, shellLiteral, valueType } from '../lib/format';
 import { useStore } from '../state/store';
@@ -131,34 +131,31 @@ export function ResultView({
     edit?.onRowPatch(rowIndex, field, value);
   };
 
-  const notify = (message: string) => store.pushToast({ kind: 'info', message });
-
-  const fail = (message: string, error: unknown) =>
-    store.pushToast({ kind: 'error', message, detail: errorMessage(error) });
+  const hint = (message: string) => store.pushToast({ kind: 'info', message });
 
   const copy = async (text: string, label: string) => {
     try {
       await unwrap(api.app.copyToClipboard(text));
-      store.pushToast({ kind: 'success', message: `Copied ${label}` });
+      store.notify(`Copied ${label}`);
     } catch (error) {
-      fail('Could not copy to the clipboard', error);
+      store.reportError('Could not copy to the clipboard', error);
     }
   };
 
   const startEdit = (rowIndex: number, column: string) => {
     if (!edit) return;
     if (column === '_id') {
-      notify('The _id of an existing document cannot be changed.');
+      hint('The _id of an existing document cannot be changed.');
       return;
     }
     const idJson = idJsonOf(rows[rowIndex]);
     if (!idJson) {
-      notify('This row has no _id, so it cannot be edited in place.');
+      hint('This row has no _id, so it cannot be edited in place.');
       return;
     }
     const editor = cellEditor(rows[rowIndex]?.[column]);
     if (!editor) {
-      notify(`“${column}” holds a value that needs the document editor.`);
+      hint(`“${column}” holds a value that needs the document editor.`);
       return;
     }
     setSelected({ row: rowIndex, column });
@@ -193,7 +190,8 @@ export function ResultView({
     try {
       valueJson = cellValueJson(active.kind, active.draft);
     } catch (error) {
-      store.pushToast({ kind: 'error', message: errorMessage(error) });
+      // The editor stays open on invalid input so the value can be fixed.
+      store.reportError(`“${active.column}” cannot hold that value`, error);
       return;
     }
 
@@ -202,9 +200,10 @@ export function ResultView({
     try {
       const { value } = await unwrap(api.data.setDocumentField(ref, active.column, valueJson));
       applyPatch(active.row, active.column, value);
+      store.notify(`Updated “${active.column}”`);
       moveOn();
     } catch (error) {
-      fail(`Could not update “${active.column}”`, error);
+      store.reportError(`Could not update “${active.column}”`, error);
     } finally {
       writingRef.current = false;
       setSaving(false);
@@ -217,8 +216,9 @@ export function ResultView({
     try {
       const { value } = await unwrap(api.data.setDocumentField(ref, column, valueJson));
       applyPatch(rowIndex, column, value);
+      store.notify(`Updated “${column}”`);
     } catch (error) {
-      fail(`Could not update “${column}”`, error);
+      store.reportError(`Could not update “${column}”`, error);
     }
   };
 
@@ -228,9 +228,9 @@ export function ResultView({
     try {
       await unwrap(api.data.unsetDocumentField(ref, column));
       applyPatch(rowIndex, column, undefined);
-      store.pushToast({ kind: 'success', message: `Removed “${column}”` });
+      store.notify(`Removed “${column}”`);
     } catch (error) {
-      fail(`Could not remove “${column}”`, error);
+      store.reportError(`Could not remove “${column}”`, error);
     }
   };
 
@@ -239,10 +239,10 @@ export function ResultView({
     if (!ref) return;
     try {
       await unwrap(api.data.duplicateDocument(ref));
-      store.pushToast({ kind: 'success', message: 'Inserted a copy of the document' });
+      store.notify('Inserted a copy of the document');
       edit?.onRefresh();
     } catch (error) {
-      fail('Could not duplicate the document', error);
+      store.reportError('Could not duplicate the document', error);
     }
   };
 
@@ -260,9 +260,9 @@ export function ResultView({
       selfWriteRef.current = true;
       edit.onRowRemoved(rowIndex);
       setSelected(null);
-      store.pushToast({ kind: 'success', message: 'Deleted the document' });
+      store.notify('Deleted the document');
     } catch (error) {
-      fail('Could not delete the document', error);
+      store.reportError('Could not delete the document', error);
     }
   };
 

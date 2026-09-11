@@ -7,6 +7,7 @@ import {
   formatNumber,
   formatUptime
 } from '../lib/format';
+import { useStore } from '../state/store';
 import { IndexDialog } from './IndexDialog';
 import { Badge, Button, Spinner, StatTile } from './ui';
 
@@ -20,6 +21,7 @@ export interface StatsTabState {
 }
 
 export function StatsView({ tab }: { tab: StatsTabState }) {
+  const store = useStore();
   const [server, setServer] = useState<ServerInfo | null>(null);
   const [database, setDatabase] = useState<DatabaseStats | null>(null);
   const [collection, setCollection] = useState<CollectionStats | null>(null);
@@ -63,10 +65,11 @@ export function StatsView({ tab }: { tab: StatsTabState }) {
       await unwrap(
         api.data.dropIndex(tab.connectionId, tab.database, tab.collection, droppingIndex)
       );
+      store.notify(`Dropped the index “${droppingIndex}”`);
       setDroppingIndex(null);
       await load();
     } catch (caught) {
-      setError(errorMessage(caught));
+      store.reportError(`Could not drop the index “${droppingIndex}”`, caught);
       setDroppingIndex(null);
     }
   };

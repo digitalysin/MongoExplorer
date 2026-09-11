@@ -98,7 +98,7 @@ export function ImportDialog({
           })
         );
         setDone(`${kind} finished.`);
-        store.pushToast({ kind: 'success', message: `${kind} finished` });
+        store.notify(`${kind} finished`);
       } else {
         const result = await unwrap(
           api.transfer.importCollection({
@@ -125,11 +125,16 @@ export function ImportDialog({
             result.failed > 0 ? ` — ${formatNumber(result.failed)} failed` : ''
           }`
         );
-        store.pushToast({
-          kind: result.failed > 0 ? 'error' : 'success',
-          message: `Imported ${formatNumber(result.processed)} documents`,
-          detail: result.errors.slice(0, 5).join('\n') || undefined
-        });
+        if (result.failed > 0) {
+          store.reportError(
+            `${formatNumber(result.failed)} of ${formatNumber(
+              result.processed + result.failed
+            )} documents were not imported`,
+            result.errors.slice(0, 5).join('\n')
+          );
+        } else {
+          store.notify(`Imported ${formatNumber(result.processed)} documents`);
+        }
       }
       onImported();
     } catch (caught) {

@@ -85,6 +85,7 @@ export function ConnectionDialog({
     try {
       const saved = await unwrap(api.connections.save(draft, secrets()));
       await store.refreshConnections();
+      store.notify(`Saved the connection “${saved.name}”`);
       onSaved(saved, connectNow);
     } catch (caught) {
       setError(errorMessage(caught));

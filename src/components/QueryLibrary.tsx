@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import type { QueryHistoryEntry, SavedQuery } from '../../shared/types';
 import { api, errorMessage, unwrap } from '../lib/api';
 import { formatDuration, formatNumber } from '../lib/format';
+import { useStore } from '../state/store';
 import { Badge, Button, EmptyState, Modal, Spinner } from './ui';
 
 function relativeTime(iso: string): string {
@@ -20,6 +21,7 @@ export function QueryLibrary({
   /** Loads the chosen query into the active tab. */
   onOpen: (code: string, database: string | null) => void;
 }) {
+  const store = useStore();
   const [tab, setTab] = useState<'history' | 'saved'>('history');
   const [history, setHistory] = useState<QueryHistoryEntry[] | null>(null);
   const [saved, setSaved] = useState<SavedQuery[] | null>(null);
@@ -53,8 +55,13 @@ export function QueryLibrary({
             <Button
               size="sm"
               onClick={async () => {
-                await unwrap(api.library.clearHistory());
-                await load();
+                try {
+                  await unwrap(api.library.clearHistory());
+                  store.notify('Cleared the query history');
+                  await load();
+                } catch (caught) {
+                  store.reportError('Could not clear the query history', caught);
+                }
               }}
             >
               Clear history
@@ -148,8 +155,13 @@ export function QueryLibrary({
                   variant="ghost"
                   title="Delete"
                   onClick={async () => {
-                    await unwrap(api.library.removeSavedQuery(entry.id));
-                    await load();
+                    try {
+                      await unwrap(api.library.removeSavedQuery(entry.id));
+                      store.notify(`Deleted “${entry.name}”`);
+                      await load();
+                    } catch (caught) {
+                      store.reportError(`Could not delete “${entry.name}”`, caught);
+                    }
                   }}
                 >
                   🗑

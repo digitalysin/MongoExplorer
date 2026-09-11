@@ -93,7 +93,7 @@ export function ExportDialog({
           })
         );
         setDone(`${kind} finished. Output written to ${target}`);
-        store.pushToast({ kind: 'success', message: `${kind} finished` });
+        store.notify(`${kind} finished`);
       } else {
         const result = await unwrap(
           api.transfer.exportCollection({
@@ -115,10 +115,7 @@ export function ExportDialog({
         setDone(
           `Exported ${formatNumber(result.processed)} documents in ${formatDuration(result.durationMs)} to ${result.filePath}`
         );
-        store.pushToast({
-          kind: 'success',
-          message: `Exported ${formatNumber(result.processed)} documents`
-        });
+        store.notify(`Exported ${formatNumber(result.processed)} documents`);
       }
     } catch (caught) {
       setError(errorMessage(caught));

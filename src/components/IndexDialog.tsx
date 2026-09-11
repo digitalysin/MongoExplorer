@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { api, errorMessage, unwrap } from '../lib/api';
+import { useStore } from '../state/store';
 import { Button, Checkbox, Field, Modal, TextInput } from './ui';
 
 export function IndexDialog({
@@ -15,6 +16,7 @@ export function IndexDialog({
   onClose: () => void;
   onCreated: () => void;
 }) {
+  const store = useStore();
   const [keys, setKeys] = useState('{ }');
   const [name, setName] = useState('');
   const [unique, setUnique] = useState(false);
@@ -43,6 +45,7 @@ export function IndexDialog({
           collation: collation.trim() || undefined
         })
       );
+      store.notify(`Created the index “${result.name}”`);
       onCreated();
       onClose();
       return result;

@@ -207,3 +207,7 @@ scripts/             build, dev, icon, mongod, smoke and UI-check harnesses
   not read.
 - Passwords never appear in logs; connection strings are redacted before being
   shown or passed to external tools.
+
+## Licence
+
+Copyright © 2026 digitalysin. Released under the [MIT licence](LICENSE).

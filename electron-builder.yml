@@ -1,6 +1,6 @@
 appId: com.mongoexplorer.desktop
 productName: Mongo Explorer
-copyright: Copyright © 2026 Mongo Explorer
+copyright: Copyright © 2026 digitalysin
 
 directories:
   output: release

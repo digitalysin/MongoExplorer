@@ -68,6 +68,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
             {versions
               ? `Mongo Explorer ${versions.app} · Electron ${versions.electron} · Node ${versions.node} · driver ${versions.driver}`
               : ''}
+            {versions ? <br /> : null}© 2026 digitalysin · MIT licence
           </span>
           <span className="spacer" />
           <Button onClick={onClose}>Cancel</Button>

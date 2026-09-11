@@ -4,8 +4,9 @@
   "version": "0.1.4",
   "description": "Cross-platform desktop GUI for MongoDB: saved connections, query editor, stats and import/export",
   "author": {
-    "name": "Mongo Explorer",
-    "email": "noreply@mongo-explorer.local"
+    "name": "digitalysin",
+    "email": "digitalysin@users.noreply.github.com",
+    "url": "https://github.com/digitalysin"
   },
   "homepage": "https://github.com/digitalysin/MongoExplorer",
   "license": "MIT",

@@ -352,6 +352,11 @@ async function main(): Promise<void> {
   if ((await count(window, '.data-table td.is-selected')) !== 1) {
     throw new Error('the edited cell lost its selection after the write');
   }
+  // A finished operation confirms itself without interrupting anyone.
+  const toast = await textOf(window, '.toast.kind-success');
+  if (!toast.includes('Updated “status”')) {
+    throw new Error(`the write did not confirm itself in a toast: ${toast || '(no toast)'}`);
+  }
 
   console.log('  tabbing to the next cell…');
   if (!(await cellEvent(window, 0, 'status', 'dblclick')).ok) {
@@ -405,6 +410,30 @@ async function main(): Promise<void> {
     }
   }
 
+  console.log('  a rejected value must block rather than fade away…');
+  if (!(await cellEvent(window, 0, 'amount', 'dblclick')).ok) {
+    throw new Error('could not open the amount editor');
+  }
+  await wait(300);
+  await commitCellEditor(window, 'not a number');
+  await wait(600);
+  const dialog = await textOf(window, '.modal-header');
+  if (!dialog.includes('Something went wrong') || !dialog.includes('amount')) {
+    throw new Error(`a rejected value did not raise the error dialog: ${dialog || '(none)'}`);
+  }
+  if (!(await textOf(window, '.modal-body')).includes('is not a number')) {
+    throw new Error('the error dialog does not say why the value was rejected');
+  }
+  await shoot(window, '09c-error-dialog');
+  await click(window, '.modal-footer .btn', 'Close');
+  await wait(300);
+  if ((await count(window, '.modal')) !== 0) throw new Error('the error dialog did not close');
+  await keyOnEditor(window, 'Escape');
+  await wait(300);
+  if ((await amountOf(reference)) !== 'int') {
+    throw new Error('a rejected value must not be written');
+  }
+
   console.log('  right-clicking a row…');
   const menuOpened = await cellEvent(window, 0, 'status', 'contextmenu');
   if (!menuOpened.ok) throw new Error(`could not right-click the status cell: ${menuOpened.reason}`);
@@ -420,7 +449,7 @@ async function main(): Promise<void> {
   ]) {
     if (!menu.includes(label)) throw new Error(`the context menu is missing "${label}": ${menu}`);
   }
-  await shoot(window, '09c-row-context-menu');
+  await shoot(window, '09d-row-context-menu');
   if (!(await click(window, '.context-menu-item', 'Set to null'))) {
     throw new Error('the context menu has no "Set to null" action');
   }
@@ -453,7 +482,7 @@ async function main(): Promise<void> {
   if (!(await cellText(window, 0, 'status')).includes('pending')) {
     throw new Error('the filtered result still holds other statuses');
   }
-  await shoot(window, '09d-filtered-by-value');
+  await shoot(window, '09e-filtered-by-value');
   await click(window, '.tab.is-active .tab-close');
   await wait(500);
 

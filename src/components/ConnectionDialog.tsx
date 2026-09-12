@@ -1,5 +1,10 @@
 import { useEffect, useState } from 'react';
-import type { ConnectionConfig, ConnectionSecrets, ServerInfo } from '../../shared/types';
+import type {
+  ConnectionConfig,
+  ConnectionEnvironment,
+  ConnectionSecrets,
+  ServerInfo
+} from '../../shared/types';
 import { api, errorMessage, unwrap } from '../lib/api';
 import { useStore } from '../state/store';
 import { Badge, Button, Checkbox, Field, Modal, Select, Spinner, TextInput } from './ui';
@@ -145,6 +150,31 @@ export function ConnectionDialog({
                 type="color"
                 value={draft.color ?? '#3ba55d'}
                 onChange={(event) => patch({ color: event.target.value })}
+              />
+            </Field>
+            <Field
+              label="Environment"
+              hint="A production connection asks you to type the name of anything you drop."
+            >
+              <Select
+                value={draft.environment ?? 'development'}
+                onChange={(event) =>
+                  patch({ environment: event.target.value as ConnectionEnvironment })
+                }
+              >
+                <option value="development">Development</option>
+                <option value="staging">Staging</option>
+                <option value="production">Production</option>
+              </Select>
+            </Field>
+            <Field
+              label="Write protection"
+              hint="Refused in the main process, so nothing in the app can write by accident."
+            >
+              <Checkbox
+                label="Read-only — refuse every write on this connection"
+                checked={Boolean(draft.readOnly)}
+                onChange={(checked) => patch({ readOnly: checked })}
               />
             </Field>
           </div>

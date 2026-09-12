@@ -30,6 +30,37 @@ export function Field({
   );
 }
 
+/**
+ * Friction on purpose: typing the name of the thing being destroyed is the one
+ * confirmation people cannot click through on autopilot.
+ */
+export function TypeToConfirm({
+  word,
+  value,
+  onChange
+}: {
+  word: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="field type-to-confirm">
+      <span className="field-label">
+        Type <span className="mono">{word}</span> to confirm
+      </span>
+      <input
+        className="input"
+        autoFocus
+        spellCheck={false}
+        autoComplete="off"
+        value={value}
+        placeholder={word}
+        onChange={(event) => onChange(event.target.value)}
+      />
+    </label>
+  );
+}
+
 export function TextInput(props: InputHTMLAttributes<HTMLInputElement>) {
   return <input {...props} className={`input ${props.className ?? ''}`} />;
 }

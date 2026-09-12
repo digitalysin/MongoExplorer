@@ -103,6 +103,20 @@ export function Sidebar(props: SidebarProps) {
                 <span className="name" title={config.name}>
                   {config.name}
                 </span>
+                {config.environment === 'production' ? (
+                  <span className="tag tag-prod" title="Production — drops ask you to type the name">
+                    prod
+                  </span>
+                ) : config.environment === 'staging' ? (
+                  <span className="tag" title="Staging">
+                    stg
+                  </span>
+                ) : null}
+                {config.readOnly ? (
+                  <span className="tag tag-readonly" title="Read-only — every write is refused">
+                    read-only
+                  </span>
+                ) : null}
                 <span className="row-actions" onClick={(event) => event.stopPropagation()}>
                   {connected ? (
                     <>

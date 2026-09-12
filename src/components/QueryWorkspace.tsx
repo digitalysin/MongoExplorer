@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { QueryResult } from '../../shared/types';
+import type { QueryResult, QueryWritePreview } from '../../shared/types';
+import { detectWrites, type DetectedWrite } from '../../shared/writeOps';
 import { api, errorMessage, unwrap } from '../lib/api';
 import { formatDuration, formatNumber } from '../lib/format';
 import { useStore } from '../state/store';
@@ -7,6 +8,7 @@ import { DocumentEditor, type DocumentEditorTarget } from './DocumentEditor';
 import { QueryEditor } from './QueryEditor';
 import { QueryLibrary, SaveQueryDialog } from './QueryLibrary';
 import { ResultView, type ResultMode } from './ResultView';
+import { WriteGuardDialog } from './WriteGuardDialog';
 import { Badge, Button, EmptyState, Select, Spinner } from './ui';
 
 export interface QueryTabState {
@@ -23,6 +25,14 @@ export interface QueryTabState {
   running: boolean;
 }
 
+interface PendingWrite {
+  code: string;
+  explain: 'executionStats' | null;
+  writes: DetectedWrite[];
+  preview: QueryWritePreview[] | null;
+  checking: boolean;
+}
+
 export function QueryWorkspace({
   tab,
   onPatch
@@ -36,19 +46,21 @@ export function QueryWorkspace({
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [saveOpen, setSaveOpen] = useState(false);
   const [editing, setEditing] = useState<DocumentEditorTarget | null>(null);
+  const [pendingWrite, setPendingWrite] = useState<PendingWrite | null>(null);
   const dragState = useRef<{ startY: number; startHeight: number } | null>(null);
   const databases = store.databases[tab.connectionId] ?? [];
+  const connection = store.connections.find((entry) => entry.id === tab.connectionId);
+  const environment = connection?.environment ?? 'development';
 
-  const run = useCallback(
-    async (explain: 'executionStats' | null = null, code?: string) => {
+  const execute = useCallback(
+    async (code: string, explain: 'executionStats' | null) => {
       onPatch({ running: true, error: null });
       try {
         const result = await unwrap(
           api.query.run({
             connectionId: tab.connectionId,
             database: tab.database,
-            // A freshly written query runs before the patched tab state arrives.
-            code: code ?? tab.code,
+            code,
             limit: tab.limit,
             explain
           })
@@ -59,7 +71,63 @@ export function QueryWorkspace({
         onPatch({ running: false, error: errorMessage(error), result: null });
       }
     },
-    [onPatch, tab.code, tab.connectionId, tab.database, tab.limit]
+    [onPatch, tab.connectionId, tab.database, tab.limit]
+  );
+
+  /**
+   * Nothing reaches the deployment through this function without the user
+   * having been told what it would change — unless the query only reads, which
+   * is the common case and stays as immediate as it was.
+   */
+  const run = useCallback(
+    async (explain: 'executionStats' | null = null, code?: string) => {
+      // A freshly written query runs before the patched tab state arrives.
+      const source = code ?? tab.code;
+      const writes = detectWrites(source);
+
+      if (writes.length === 0) {
+        await execute(source, explain);
+        return;
+      }
+
+      if (connection?.readOnly) {
+        store.reportError(
+          `“${connection.name}” is read-only`,
+          `The query calls ${writes
+            .map((write) => write.method)
+            .join(', ')}. Turn read-only off in the connection's settings if you meant to write to it.`
+        );
+        return;
+      }
+
+      if (store.settings?.confirmDestructiveOps === false) {
+        await execute(source, explain);
+        return;
+      }
+
+      setPendingWrite({ code: source, explain, writes, preview: null, checking: true });
+      try {
+        const dry = await unwrap(
+          api.query.run({
+            connectionId: tab.connectionId,
+            database: tab.database,
+            code: source,
+            limit: tab.limit,
+            explain,
+            dryRun: true
+          })
+        );
+        setPendingWrite((current) =>
+          current && current.code === source
+            ? { ...current, preview: dry.preview ?? [], checking: false }
+            : current
+        );
+      } catch (error) {
+        setPendingWrite(null);
+        onPatch({ running: false, error: errorMessage(error), result: null });
+      }
+    },
+    [connection, execute, onPatch, store, tab.code, tab.connectionId, tab.database, tab.limit]
   );
 
   useEffect(() => {
@@ -306,6 +374,22 @@ export function QueryWorkspace({
         />
       ) : null}
 
+      {pendingWrite ? (
+        <WriteGuardDialog
+          writes={pendingWrite.writes}
+          preview={pendingWrite.preview}
+          checking={pendingWrite.checking}
+          environment={environment}
+          requireText={environment === 'production' ? confirmWord(pendingWrite) : null}
+          onCancel={() => setPendingWrite(null)}
+          onConfirm={() => {
+            const { code, explain } = pendingWrite;
+            setPendingWrite(null);
+            void execute(code, explain);
+          }}
+        />
+      ) : null}
+
       {editing ? (
         <DocumentEditor
           target={editing}
@@ -315,4 +399,18 @@ export function QueryWorkspace({
       ) : null}
     </div>
   );
+}
+
+/**
+ * On production the user types the name of what is about to change: the
+ * collection when there is only one, otherwise the database.
+ */
+function confirmWord(pending: PendingWrite): string {
+  const namespaces = new Set((pending.preview ?? []).map((entry) => entry.namespace));
+  if (namespaces.size === 1) {
+    const [namespace] = [...namespaces];
+    return namespace.split('.').slice(1).join('.') || namespace;
+  }
+  const collections = pending.writes.map((write) => write.collection).filter(Boolean);
+  return collections.length === 1 ? (collections[0] as string) : 'production';
 }

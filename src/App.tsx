@@ -9,7 +9,7 @@ import { SettingsDialog } from './components/SettingsDialog';
 import { Sidebar } from './components/Sidebar';
 import { StatsView, type StatsTabState } from './components/StatsView';
 import { TransferStatus } from './components/TransferProgressPanel';
-import { Button, EmptyState, Modal } from './components/ui';
+import { Button, EmptyState, Modal, TypeToConfirm } from './components/ui';
 import { api, unwrap } from './lib/api';
 import { useStore } from './state/store';
 
@@ -19,6 +19,8 @@ interface ConfirmState {
   title: string;
   message: string;
   confirmLabel: string;
+  /** When set, the user has to type this word before the action is allowed. */
+  requireText?: string;
   onConfirm: () => Promise<void> | void;
 }
 
@@ -44,6 +46,7 @@ export default function App() {
     collection?: string;
   } | null>(null);
   const [confirm, setConfirm] = useState<ConfirmState | null>(null);
+  const [typed, setTyped] = useState('');
   const [createTarget, setCreateTarget] = useState<CreateTarget | null>(null);
 
   const activeTab = useMemo(
@@ -134,6 +137,7 @@ export default function App() {
       title: 'Drop collection',
       message: `${database}.${collection} and all of its documents will be deleted. This cannot be undone.`,
       confirmLabel: 'Drop collection',
+      requireText: isProduction(connectionId) ? collection : undefined,
       onConfirm: perform
     });
   };
@@ -160,6 +164,7 @@ export default function App() {
       title: 'Drop database',
       message: `${database} and every collection inside it will be deleted. This cannot be undone.`,
       confirmLabel: 'Drop database',
+      requireText: isProduction(connectionId) ? database : undefined,
       onConfirm: perform
     });
   };
@@ -190,8 +195,17 @@ export default function App() {
     });
   };
 
+  // The typed confirmation starts empty for each new prompt.
+  useEffect(() => setTyped(''), [confirm]);
+
+  const isProduction = (connectionId: string) =>
+    store.connections.find((entry) => entry.id === connectionId)?.environment === 'production';
+
   const selection = store.selection;
   const activeInfo = selection ? store.active[selection.connectionId] : null;
+  const activeConfig = selection
+    ? store.connections.find((entry) => entry.id === selection.connectionId)
+    : undefined;
 
   return (
     <div className="app">
@@ -348,6 +362,10 @@ export default function App() {
           {activeInfo ? (
             <>
               <span>{activeInfo.name}</span>
+              {activeConfig?.environment === 'production' ? (
+                <span className="tag tag-prod">production</span>
+              ) : null}
+              {activeConfig?.readOnly ? <span className="tag tag-readonly">read-only</span> : null}
               <span className="truncate mono">{activeInfo.uriSafe}</span>
               <span>
                 {activeInfo.topology} · MongoDB {activeInfo.serverVersion}
@@ -469,6 +487,7 @@ export default function App() {
               <Button onClick={() => setConfirm(null)}>Cancel</Button>
               <Button
                 variant="danger"
+                disabled={Boolean(confirm.requireText) && typed.trim() !== confirm.requireText}
                 onClick={async () => {
                   const action = confirm.onConfirm;
                   setConfirm(null);
@@ -481,6 +500,9 @@ export default function App() {
           }
         >
           <p style={{ margin: 0, lineHeight: 1.6 }}>{confirm.message}</p>
+          {confirm.requireText ? (
+            <TypeToConfirm word={confirm.requireText} value={typed} onChange={setTyped} />
+          ) : null}
         </Modal>
       ) : null}
     </div>

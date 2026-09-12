@@ -61,6 +61,21 @@ Tools** (or let it auto-detect them from your `PATH`).
   exist once it holds a collection — so the dialog asks for both names at once.
   Drop a database or a collection from the same rows, behind a confirmation.
 
+**Guard rails**
+- Any connection can be marked **read-only**. Writes are refused in the main
+  process rather than hidden in the interface, so no dialog, context menu,
+  import or piece of query code can get around it.
+- A connection marked **production** makes destructive work deliberate: you
+  type the name of the collection or database before it is dropped.
+- A query that writes is measured before it runs. The same code is executed
+  with its writes counted instead of performed, so you are told
+  “`updateMany` on `shop.orders` — 1,284 documents” and can still say no.
+  `$out` and `$merge` stages run without their output stage, and a raw
+  `runCommand` that writes is caught too.
+- The scan is deliberately eager but not naive: a `deleteMany` inside a string
+  or a comment is not a write, while a write it cannot count in advance is
+  still reported as one. Clear the confirmation setting to skip the prompt.
+
 **Statistics**
 
 ![Collection statistics](docs/screenshot-statistics.png)

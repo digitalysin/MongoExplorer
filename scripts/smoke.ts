@@ -15,6 +15,7 @@ import path from 'node:path';
 import { upsertConnection, removeConnection } from '../electron/services/connections.js';
 import { connect, disconnect, getDb, testConnection } from '../electron/services/pool.js';
 import { explainConnectionError } from '../electron/services/connectionErrors.js';
+import { assertWritable } from '../electron/services/guards.js';
 import { runQuery } from '../electron/services/query.js';
 import {
   collectionStats,
@@ -42,6 +43,7 @@ import {
 } from '../electron/services/library.js';
 import { cancelJob, exportCollection, importCollection } from '../electron/services/transfer.js';
 import { summarizeTransfer } from '../src/lib/transferProgress.js';
+import { detectWrites } from '../shared/writeOps.js';
 import { detectTools, runTool } from '../electron/services/tools.js';
 import { encryptionAvailable, getSecrets, setSecrets } from '../electron/services/store.js';
 
@@ -209,6 +211,110 @@ async function main(): Promise<void> {
   await check('queries cannot reach Node globals', async () => {
     const result = await query('return typeof require + "," + typeof process');
     assert.equal(result.value, 'undefined,undefined');
+  });
+
+  // --- write guards --------------------------------------------------------
+
+  await check('the write scan finds writes and ignores lookalikes', () => {
+    assert.deepEqual(detectWrites('db.people.find({ name: "Ada" })'), []);
+    assert.deepEqual(detectWrites('db.getCollection("orders").deleteMany({ paid: false })'), [
+      { method: 'deleteMany', collection: 'orders' }
+    ]);
+    assert.deepEqual(
+      detectWrites('// db.people.deleteMany({})\ndb.people.countDocuments({})'),
+      [],
+      'a write inside a comment is not a write'
+    );
+    assert.deepEqual(
+      detectWrites('db.people.find({ note: "call deleteMany({}) later" })'),
+      [],
+      'a write inside a string is not a write'
+    );
+    assert.deepEqual(detectWrites('db.people.aggregate([{ $out: "copy" }])'), [
+      { method: '$out', collection: null }
+    ]);
+    assert.deepEqual(detectWrites('db.runCommand({ dropDatabase: 1 })'), [
+      { method: 'dropDatabase', collection: null }
+    ]);
+    assert.deepEqual(detectWrites('db.runCommand({ dbStats: 1 })'), []);
+  });
+
+  await check('a dry run counts what a delete would remove without removing it', async () => {
+    const before = await db.collection('people').countDocuments();
+    const result = await runQuery({
+      connectionId: connection.id,
+      database: DATABASE,
+      code: 'db.getCollection("people").deleteMany({ age: { $gt: 40 } })',
+      dryRun: true
+    });
+    assert.deepEqual(result.preview, [
+      { method: 'deleteMany', namespace: `${DATABASE}.people`, affected: 2, note: undefined }
+    ]);
+    assert.equal(await db.collection('people').countDocuments(), before, 'nothing may be deleted');
+  });
+
+  await check('a dry run says when only the first of many matches would change', async () => {
+    const result = await runQuery({
+      connectionId: connection.id,
+      database: DATABASE,
+      code: 'db.people.updateOne({ age: { $gt: 40 } }, { $set: { seen: true } })',
+      dryRun: true
+    });
+    const [entry] = result.preview ?? [];
+    assert.equal(entry?.affected, 1);
+    assert.match(String(entry?.note), /2 documents match/);
+    assert.equal(await db.collection('people').countDocuments({ seen: true }), 0);
+  });
+
+  await check('a dry run leaves an aggregation $out unwritten', async () => {
+    const result = await runQuery({
+      connectionId: connection.id,
+      database: DATABASE,
+      code: 'db.people.aggregate([{ $match: {} }, { $out: "people_copy" }]).toArray()',
+      dryRun: true
+    });
+    assert.equal(result.preview?.[0]?.method, 'aggregate $out');
+    assert.equal(result.totalReturned, 3, 'the pipeline still reports what it would have written');
+    const names = await db.listCollections({ name: 'people_copy' }).toArray();
+    assert.equal(names.length, 0, 'the output collection must not exist');
+  });
+
+  await check('a read-only connection refuses writes from every direction', async () => {
+    upsertConnection({ ...connection, readOnly: true });
+    try {
+      assert.throws(
+        () => assertWritable(connection.id, 'the drop'),
+        /marked read-only/,
+        'the IPC guard should refuse'
+      );
+      await assert.rejects(
+        runQuery({
+          connectionId: connection.id,
+          database: DATABASE,
+          code: 'db.people.deleteMany({})'
+        }),
+        /read-only/,
+        'query code should be stopped as it runs'
+      );
+      await assert.rejects(
+        runQuery({
+          connectionId: connection.id,
+          database: DATABASE,
+          code: 'db.runCommand({ drop: "people" })'
+        }),
+        /read-only/,
+        'a raw command should be stopped too'
+      );
+      const reads = await runQuery({
+        connectionId: connection.id,
+        database: DATABASE,
+        code: 'db.people.countDocuments({})'
+      });
+      assert.equal(reads.value, 3, 'reads must still work');
+    } finally {
+      upsertConnection({ ...connection, readOnly: false });
+    }
+    assert.equal(await db.collection('people').countDocuments(), 3);
   });
 
   // --- statistics ----------------------------------------------------------

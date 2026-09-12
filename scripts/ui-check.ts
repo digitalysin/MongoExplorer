@@ -12,6 +12,7 @@ import path from 'node:path';
 import { MongoClient } from 'mongodb';
 import { PROGRESS_CHANNEL, registerIpcHandlers } from '../electron/ipc.js';
 import { upsertConnection } from '../electron/services/connections.js';
+import { saveQuery } from '../electron/services/library.js';
 
 const HOST = '127.0.0.1:27099';
 const DATABASE = 'mongo_explorer_ui';
@@ -185,6 +186,40 @@ async function textOf(window: BrowserWindow, selector: string): Promise<string> 
   `);
 }
 
+/** Clicks an action inside the connection row with the given name. */
+async function clickInConnection(
+  window: BrowserWindow,
+  name: string,
+  title: string
+): Promise<boolean> {
+  return window.webContents.executeJavaScript(`
+    (() => {
+      const row = [...document.querySelectorAll('.connection-row')].find(
+        (node) => node.textContent.includes(${JSON.stringify(name)})
+      );
+      const button = row?.querySelector('[title=' + JSON.stringify(${JSON.stringify(title)}) + ']');
+      if (!button) return false;
+      button.click();
+      return true;
+    })()
+  `);
+}
+
+/** Clicks the checkbox whose label contains `text`, inside the open modal. */
+async function toggleCheckbox(window: BrowserWindow, text: string): Promise<boolean> {
+  return window.webContents.executeJavaScript(`
+    (() => {
+      const box = [...document.querySelectorAll('.modal .checkbox')].find(
+        (node) => node.textContent.includes(${JSON.stringify(text)})
+      );
+      const input = box?.querySelector('input[type=checkbox]');
+      if (!input) return false;
+      input.click();
+      return true;
+    })()
+  `);
+}
+
 /** Writes an NDJSON file big enough that importing it cannot finish instantly. */
 async function writeBigNdjson(filePath: string, documents: number): Promise<void> {
   const stream = fs.createWriteStream(filePath);
@@ -222,6 +257,13 @@ async function main(): Promise<void> {
     uri: 'mongodb+srv://reader@cluster0.example.mongodb.net',
     savePassword: false,
     color: '#5b8def'
+  });
+
+  // A write the guard can be tested against, reachable without typing.
+  saveQuery({
+    name: 'Flag the pending orders',
+    code: 'db.getCollection("orders").updateMany({ status: "pending" }, { $set: { flagged: true } })',
+    database: DATABASE
   });
 
   registerIpcHandlers();
@@ -513,6 +555,83 @@ async function main(): Promise<void> {
     throw new Error('the filtered result still holds other statuses');
   }
   await shoot(window, '09e-filtered-by-value');
+
+  console.log('  running a query that writes…');
+  const guarded = new MongoClient(`mongodb://${HOST}`);
+  await guarded.connect();
+  const guardedOrders = guarded.db(DATABASE).collection('orders');
+  // The query arrives through the library rather than the keyboard: a hidden
+  // window has no focus, so CodeMirror cannot be typed into from out here.
+  await click(window, '.toolbar .btn', 'History');
+  await wait(900);
+  await click(window, '.modal .segmented button', 'Saved');
+  await wait(600);
+  if (!(await click(window, '.library-entry .btn', 'Open'))) {
+    throw new Error('the seeded query is missing from the library');
+  }
+  await wait(600);
+  const loadedCode = await textOf(window, '.cm-content');
+  if (!loadedCode.includes('updateMany')) {
+    throw new Error(`the write query did not reach the editor: ${loadedCode}`);
+  }
+  await click(window, '.toolbar .btn-primary');
+  await wait(2500);
+  const guardText = await textOf(window, '.modal');
+  for (const fragment of ['This query writes to your data', 'updateMany', 'documents']) {
+    if (!guardText.includes(fragment)) {
+      throw new Error(`the write guard should mention ${fragment}, saw: ${guardText.slice(0, 300)}`);
+    }
+  }
+  await shoot(window, '09f-write-guard');
+
+  console.log('  cancelling it…');
+  await click(window, '.modal-footer .btn', 'Cancel');
+  await wait(400);
+  if ((await guardedOrders.countDocuments({ flagged: true })) !== 0) {
+    throw new Error('cancelling the guard still wrote to the collection');
+  }
+
+  console.log('  confirming it…');
+  await click(window, '.toolbar .btn-primary');
+  await wait(2500);
+  if (!(await click(window, '.modal-footer .btn', 'Run it'))) {
+    throw new Error('the write guard offered no way to go ahead');
+  }
+  await wait(2000);
+  const flagged = await guardedOrders.countDocuments({ flagged: true });
+  if (flagged === 0) throw new Error('confirming the guard did not run the write');
+
+  console.log('  refusing a write on a read-only connection…');
+  if (!(await clickInConnection(window, 'Local mongod', 'Edit connection'))) {
+    throw new Error('could not open the local connection for editing');
+  }
+  await wait(800);
+  if (!(await toggleCheckbox(window, 'Read-only'))) {
+    throw new Error('the connection dialog has no read-only switch');
+  }
+  await click(window, '.modal-footer .btn', 'Save');
+  await wait(1200);
+  await click(window, '.toolbar .btn-primary');
+  await wait(1500);
+  const refusal = await textOf(window, '.modal');
+  if (!/read-only/i.test(refusal)) {
+    throw new Error(`a read-only connection should refuse the write, saw: ${refusal.slice(0, 300)}`);
+  }
+  await shoot(window, '09g-read-only-refusal');
+  await click(window, '.modal-footer .btn', 'Close');
+  await wait(400);
+  if ((await guardedOrders.countDocuments({ flagged: true })) !== flagged) {
+    throw new Error('a read-only connection wrote anyway');
+  }
+
+  await clickInConnection(window, 'Local mongod', 'Edit connection');
+  await wait(800);
+  await toggleCheckbox(window, 'Read-only');
+  await click(window, '.modal-footer .btn', 'Save');
+  await wait(1000);
+  await guardedOrders.updateMany({}, { $unset: { flagged: '' } });
+  await guarded.close();
+
   await click(window, '.tab.is-active .tab-close');
   await wait(500);
 

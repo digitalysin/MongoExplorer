@@ -630,10 +630,52 @@ async function main(): Promise<void> {
   await click(window, '.modal-footer .btn', 'Save');
   await wait(1000);
   await guardedOrders.updateMany({}, { $unset: { flagged: '' } });
-  await guarded.close();
 
   await click(window, '.tab.is-active .tab-close');
   await wait(500);
+
+  console.log('  paging through the results…');
+  await fill(window, '.toolbar .input[type=number]', '100');
+  await wait(200);
+  await click(window, '.toolbar .btn-primary');
+  await wait(2000);
+  if ((await count(window, '.data-table tbody tr')) !== 100) {
+    throw new Error('the limit should decide the size of a page');
+  }
+  if (!(await textOf(window, '.result-bar')).includes('rows 1–100')) {
+    throw new Error(`the first page should say which rows it holds: ${await textOf(window, '.result-bar')}`);
+  }
+  const firstOnPageOne = await cellText(window, 0, 'reference');
+  if (!(await click(window, '.result-bar .btn[title="Next page"]'))) {
+    throw new Error('there is no way to reach the next page');
+  }
+  await wait(2000);
+  const pageTwoBar = await textOf(window, '.result-bar');
+  if (!pageTwoBar.includes('rows 101–200')) {
+    throw new Error(`the second page should count on from the first: ${pageTwoBar}`);
+  }
+  if ((await cellText(window, 0, 'reference')) === firstOnPageOne) {
+    throw new Error('the second page shows the same documents as the first');
+  }
+  if (!(await textOf(window, '.data-table tbody tr .cell-index')).startsWith('✎ 101')) {
+    throw new Error('the row numbers do not continue across pages');
+  }
+  await shoot(window, '09h-paging');
+  await click(window, '.result-bar .btn[title="Next page"]');
+  await wait(2000);
+  if (!(await textOf(window, '.result-bar')).includes('rows 201–250')) {
+    throw new Error('the last page should end where the collection does');
+  }
+  await click(window, '.result-bar .btn[title="Previous page"]');
+  await wait(1500);
+  if (!(await textOf(window, '.result-bar')).includes('rows 101–200')) {
+    throw new Error('going back should return to the previous page');
+  }
+  await fill(window, '.toolbar .input[type=number]', '200');
+  await click(window, '.toolbar .btn-primary');
+  await wait(1500);
+
+  await guarded.close();
 
   console.log('  switching the result to JSON…');
   await click(window, '.segmented button', 'JSON');

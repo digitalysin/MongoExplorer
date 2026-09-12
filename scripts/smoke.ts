@@ -8,7 +8,7 @@
  */
 import { app } from 'electron';
 import assert from 'node:assert/strict';
-import type { TransferProgress } from '../shared/types.js';
+import type { QueryResult, TransferProgress } from '../shared/types.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -211,6 +211,41 @@ async function main(): Promise<void> {
   await check('queries cannot reach Node globals', async () => {
     const result = await query('return typeof require + "," + typeof process');
     assert.equal(result.value, 'undefined,undefined');
+  });
+
+  await check('paging skips its way through a cursor', async () => {
+    const page = (skip: number) =>
+      runQuery({
+        connectionId: connection.id,
+        database: DATABASE,
+        code: 'db.people.find({}).sort({ name: 1 })',
+        limit: 1,
+        skip
+      });
+    const first = await page(0);
+    const second = await page(1);
+    const last = await page(2);
+    assert.equal(first.truncated, true, 'more rows should be reported as available');
+    assert.equal(last.truncated, false, 'the last page has nothing after it');
+    const nameOf = (result: QueryResult) =>
+      (result.documents[0] as { name: string } | undefined)?.name;
+    assert.deepEqual(
+      [nameOf(first), nameOf(second), nameOf(last)],
+      ['Ada', 'Grace', 'Linus'],
+      'each page should hold the next document'
+    );
+  });
+
+  await check('paging also works on a query that returns an array', async () => {
+    const result = await runQuery({
+      connectionId: connection.id,
+      database: DATABASE,
+      code: 'db.people.find({}).sort({ name: 1 }).toArray()',
+      limit: 2,
+      skip: 2
+    });
+    assert.equal(result.totalReturned, 1);
+    assert.equal((result.documents[0] as { name: string }).name, 'Linus');
   });
 
   // --- write guards --------------------------------------------------------

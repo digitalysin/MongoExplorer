@@ -818,6 +818,69 @@ async function main(): Promise<void> {
   await click(window, '.modal-footer .btn', 'Close');
   await wait(300);
 
+  console.log('  watching the operations panel…');
+  // A query that spins on the server for a while, so there is something real
+  // to see in the list and something real to stop.
+  const slowClient = new MongoClient(`mongodb://${HOST}`, { appName: 'ui-check-slow' });
+  await slowClient.connect();
+  let slowOutcome = 'running';
+  const slowQuery = slowClient
+    .db(DATABASE)
+    .collection('orders')
+    .find({ $where: 'var start = Date.now(); while (Date.now() - start < 20000) {} return true;' })
+    .toArray()
+    .then(() => {
+      slowOutcome = 'finished';
+    })
+    .catch(() => {
+      slowOutcome = 'stopped';
+    });
+
+  await click(window, '.titlebar-actions .btn', 'Operations');
+  await wait(1500);
+  if (!(await fill(window, '.ops-controls .input', 'ui-check-slow'))) {
+    throw new Error('the operations panel has no filter field');
+  }
+  let listed = '';
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    listed = await textOf(window, '.stats-section');
+    if (listed.includes('ui-check-slow')) break;
+    await wait(250);
+  }
+  if (!listed.includes('ui-check-slow')) {
+    throw new Error(`the operations panel never listed the slow query: ${listed.slice(0, 300)}`);
+  }
+  const opsPanel = await textOf(window, '.stats-view');
+  if (!opsPanel.includes('Profiling is off')) {
+    throw new Error(`the panel should say the profiler is off: ${opsPanel.slice(0, 300)}`);
+  }
+  await shoot(window, '17-operations');
+
+  console.log('  stopping a running operation…');
+  if ((await count(window, '.ops-table tbody tr')) !== 1) {
+    throw new Error('the filter should leave only the slow query on screen');
+  }
+  if (!(await click(window, '.ops-table .btn', 'Stop'))) {
+    throw new Error('the operations panel offers no way to stop an operation');
+  }
+  await wait(600);
+  if (!(await textOf(window, '.modal')).includes('running for')) {
+    throw new Error('stopping an operation should say what it is about to interrupt');
+  }
+  await shoot(window, '17b-stop-operation');
+  await click(window, '.modal-footer .btn', 'Stop it');
+  await Promise.race([slowQuery, wait(8000)]);
+  if (slowOutcome !== 'stopped') {
+    throw new Error(`the operation was not stopped: it ${slowOutcome}`);
+  }
+  await wait(600);
+  if (!(await textOf(window, '.toast')).includes('Stopped operation')) {
+    throw new Error('stopping an operation should be confirmed with a toast');
+  }
+  await slowClient.close();
+  await click(window, '.tab.is-active .tab-close');
+  await wait(400);
+
   console.log('  opening settings…');
   await click(window, '.titlebar-actions .btn', 'Settings');
   await wait(1500);

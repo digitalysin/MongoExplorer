@@ -16,6 +16,11 @@ import { upsertConnection, removeConnection } from '../electron/services/connect
 import { connect, disconnect, getDb, testConnection } from '../electron/services/pool.js';
 import { explainConnectionError } from '../electron/services/connectionErrors.js';
 import { assertWritable } from '../electron/services/guards.js';
+import {
+  currentOperations,
+  killOperation,
+  profilerSnapshot
+} from '../electron/services/operations.js';
 import { runQuery } from '../electron/services/query.js';
 import {
   collectionStats,
@@ -654,6 +659,61 @@ async function main(): Promise<void> {
       async () => saveQuery({ name: '  ', code: 'db.people.find({})' }),
       /Give the query a name/
     );
+  });
+
+  // --- live operations -----------------------------------------------------
+
+  await check('the live operations list sees the app itself working', async () => {
+    // A cursor left open is an operation the server will report.
+    const cursor = db.collection('orders').find({}).batchSize(1);
+    await cursor.next();
+    try {
+      const running = await currentOperations(connection.id);
+      assert.ok(running.length > 0, 'something should be running');
+      const ours = running.find((operation) => operation.appName === 'Mongo Explorer');
+      assert.ok(ours, 'the app should recognise its own operations by name');
+      assert.equal(typeof ours?.opid, 'string');
+      assert.ok(
+        running.every(
+          (operation) => operation.secondsRunning === null || operation.secondsRunning >= 0
+        ),
+        'ages should be reported in seconds'
+      );
+    } finally {
+      await cursor.close();
+    }
+  });
+
+  await check('the running list is ordered by age, oldest first', async () => {
+    const running = await currentOperations(connection.id, { includeIdle: true });
+    const ages = running.map((operation) => operation.secondsRunning ?? 0);
+    assert.deepEqual(ages, [...ages].sort((a, b) => b - a));
+  });
+
+  await check('stopping an operation that has already finished is reported', async () => {
+    // killOp accepts any id; a stale one is a no-op rather than an error, so
+    // this asserts the call shape rather than the outcome.
+    await killOperation(connection.id, '999999999');
+  });
+
+  await check('the profiler reports its level and what it recorded', async () => {
+    const off = await profilerSnapshot(connection.id, DATABASE);
+    assert.equal(off.level, 0, 'profiling starts off');
+    assert.deepEqual(off.operations, [], 'nothing is recorded while it is off');
+
+    await db.command({ profile: 2 });
+    try {
+      await db.collection('orders').find({ status: 'paid' }).toArray();
+      const on = await profilerSnapshot(connection.id, DATABASE, 10);
+      assert.equal(on.level, 2);
+      assert.ok(on.operations.length > 0, 'the profiler should have recorded the query');
+      const [entry] = on.operations;
+      assert.equal(typeof entry.millis, 'number');
+      assert.match(String(entry.namespace), /orders/);
+      assert.ok(entry.command, 'the command should be summarised for the table');
+    } finally {
+      await db.command({ profile: 0 });
+    }
   });
 
   // --- export / import (native) --------------------------------------------

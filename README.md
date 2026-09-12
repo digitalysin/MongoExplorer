@@ -90,6 +90,22 @@ Tools** (or let it auto-detect them from your `PATH`).
   keys, uniqueness, TTL, size and usage counters, plus a sampled field profile
   showing which fields exist and in what share of documents.
 
+**Operations**
+
+![Live operations](docs/screenshot-operations.png)
+
+- What the deployment is running right now, oldest first, refreshing every two
+  seconds: age, operation, namespace, a one-line command summary, the plan it
+  chose, and which application sent it.
+- Stop a runaway operation from the list. The prompt says what it will
+  interrupt, and on a production connection it asks for the operation id to be
+  typed; read-only connections cannot kill anything at all.
+- Driver monitoring chatter and idle connections are filtered out by default,
+  and this app's own queries can be hidden, so the list holds only real work.
+- Alongside it, whatever the profiler recorded as slow — how long each took,
+  the plan, and documents examined against documents returned. When profiling
+  is off the panel says so and tells you how to turn it on.
+
 **Import & export**
 - Export a collection to a JSON array, NDJSON or CSV with an optional filter,
   projection, sort, skip and limit. Relaxed or canonical extended JSON; CSV

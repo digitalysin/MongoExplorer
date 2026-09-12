@@ -33,7 +33,10 @@ Tools** (or let it auto-detect them from your `PATH`).
 - Multi-statement scripts with `await` and an explicit `return`.
 - Results as a typed table (double-click a nested value to inspect it) or as raw
   extended JSON, plus `Explain` for the execution plan.
-- Row limit per tab, with a clear badge when the result was truncated.
+- Row limit per tab, and page controls when there is more than fits: the row
+  range is spelled out (`rows 101–200`) and the row numbers keep counting, so
+  you always know where in the collection you are. Each page is one query with
+  a larger skip, so nothing is held in memory to make paging possible.
 - Every run is recorded in a searchable history (consecutive identical runs
   collapse into one), and any query can be saved under a name and reopened
   later from the same library.

@@ -30,6 +30,7 @@ import {
   serverInfoFor,
   testConnection
 } from './services/pool.js';
+import { assertWritable } from './services/guards.js';
 import { runQuery } from './services/query.js';
 import {
   collectionStats,
@@ -92,6 +93,39 @@ function toError(error: unknown): Result<never> {
   return { ok: false, error: { message: String(error) } };
 }
 
+/**
+ * Every channel that changes data. Read-only connections are refused here, so
+ * one list covers the whole renderer surface — add new write channels to it.
+ * Query code is not on the list: it is guarded while it runs, in query.ts.
+ */
+const WRITE_CHANNELS = new Set([
+  'data:createCollection',
+  'data:createDatabase',
+  'data:dropCollection',
+  'data:dropDatabase',
+  'data:createIndex',
+  'data:dropIndex',
+  'data:replaceDocument',
+  'data:insertDocument',
+  'data:deleteDocument',
+  'data:setDocumentField',
+  'data:unsetDocumentField',
+  'data:duplicateDocument',
+  'transfer:import',
+  'ops:kill'
+]);
+
+/** Handlers take the connection id either on its own or inside their request. */
+function connectionIdOf(args: unknown[]): string | null {
+  const first = args[0];
+  if (typeof first === 'string') return first;
+  if (first && typeof first === 'object') {
+    const candidate = (first as { connectionId?: unknown }).connectionId;
+    if (typeof candidate === 'string') return candidate;
+  }
+  return null;
+}
+
 /** Wraps a handler so the renderer always receives a Result instead of a rejection. */
 function handle<Args extends unknown[], T>(
   channel: string,
@@ -99,12 +133,22 @@ function handle<Args extends unknown[], T>(
 ): void {
   ipcMain.handle(channel, async (_event, ...args: unknown[]): Promise<Result<T>> => {
     try {
+      if (WRITE_CHANNELS.has(channel)) {
+        assertWritable(connectionIdOf(args), describeChannel(channel));
+      }
       const data = await handler(...(args as Args));
       return { ok: true, data };
     } catch (error) {
       return toError(error);
     }
   });
+}
+
+/** Names the refused operation the way a person would say it. */
+function describeChannel(channel: string): string {
+  const [, action] = channel.split(':');
+  const words = action.replace(/([A-Z])/g, ' $1').toLowerCase();
+  return channel === 'transfer:import' ? 'the import' : `the ${words}`;
 }
 
 function broadcast(progress: TransferProgress): void {
@@ -289,7 +333,13 @@ export function registerIpcHandlers(): void {
   });
 
   handle('tools:detect', () => detectTools());
-  handle('tools:run', (request: ToolRunRequest) => runTool(request, broadcast));
+  handle('tools:run', (request: ToolRunRequest) => {
+    // mongodump and mongoexport only read; the other two load data in.
+    if (request.tool === 'mongorestore' || request.tool === 'mongoimport') {
+      assertWritable(request.connectionId, `${request.tool}`);
+    }
+    return runTool(request, broadcast);
+  });
 
   handle('settings:get', () => loadSettings());
   handle('settings:update', (patch: Partial<AppSettings>) => {

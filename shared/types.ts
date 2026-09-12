@@ -26,11 +26,18 @@ export interface TlsConfig {
   certificateKeyFile?: string;
 }
 
+/** How much ceremony a connection's writes deserve. */
+export type ConnectionEnvironment = 'development' | 'staging' | 'production';
+
 /** A saved connection. Secrets are never persisted in this object. */
 export interface ConnectionConfig {
   id: string;
   name: string;
   color?: string;
+  /** Production connections ask for the name of whatever is about to be dropped. */
+  environment?: ConnectionEnvironment;
+  /** Refuses every write, in the main process rather than only in the UI. */
+  readOnly?: boolean;
   /** 'uri' uses `uri` verbatim; 'fields' builds the URI from host/port/etc. */
   mode: 'uri' | 'fields';
   uri?: string;
@@ -158,6 +165,17 @@ export interface QueryResult {
   collection: string | null;
   operation: string | null;
   explain?: unknown;
+  /** What a dry run found the writes in the query would have done. */
+  preview?: QueryWritePreview[];
+}
+
+/** One write a query would perform, measured without performing it. */
+export interface QueryWritePreview {
+  method: string;
+  namespace: string;
+  /** Documents the operation would change; null when that cannot be counted. */
+  affected: number | null;
+  note?: string;
 }
 
 export interface QueryRequest {
@@ -165,8 +183,15 @@ export interface QueryRequest {
   database: string;
   code: string;
   limit?: number;
+  /** Documents to skip before the page, for paging through a cursor. */
+  skip?: number;
   /** When set, wraps the query in an explain with the given verbosity. */
   explain?: 'queryPlanner' | 'executionStats' | 'allPlansExecution' | null;
+  /**
+   * Runs the reads but counts the writes instead of performing them, so the
+   * user can be told what a query would change before it changes it.
+   */
+  dryRun?: boolean;
 }
 
 export interface CreateIndexRequest {

@@ -7,13 +7,14 @@ import { ImportDialog } from './components/ImportDialog';
 import { QueryWorkspace, type QueryTabState } from './components/QueryWorkspace';
 import { SettingsDialog } from './components/SettingsDialog';
 import { Sidebar } from './components/Sidebar';
+import { OperationsView, type OperationsTabState } from './components/OperationsView';
 import { StatsView, type StatsTabState } from './components/StatsView';
 import { TransferStatus } from './components/TransferProgressPanel';
 import { Button, EmptyState, Modal, TypeToConfirm } from './components/ui';
 import { api, unwrap } from './lib/api';
 import { useStore } from './state/store';
 
-type Tab = QueryTabState | StatsTabState;
+type Tab = QueryTabState | StatsTabState | OperationsTabState;
 
 interface ConfirmState {
   title: string;
@@ -106,6 +107,19 @@ export default function App() {
         connectionId,
         database,
         collection
+      });
+    },
+    [openTab]
+  );
+
+  const openOperationsTab = useCallback(
+    (connectionId: string, database: string | null) => {
+      openTab({
+        id: nextTabId(),
+        kind: 'operations',
+        title: 'Operations',
+        connectionId,
+        database
       });
     },
     [openTab]
@@ -239,6 +253,14 @@ export default function App() {
           </Button>
           <Button
             size="sm"
+            disabled={!selection?.connectionId}
+            title="What the deployment is running right now"
+            onClick={() => selection && openOperationsTab(selection.connectionId, selection.database)}
+          >
+            Operations
+          </Button>
+          <Button
+            size="sm"
             disabled={!selection?.database || !selection.collection}
             onClick={() =>
               selection?.database &&
@@ -302,7 +324,7 @@ export default function App() {
                 className={`tab ${tab.id === activeTabId ? 'is-active' : ''}`}
                 onClick={() => setActiveTabId(tab.id)}
               >
-                <span>{tab.kind === 'stats' ? '📊' : '⌗'}</span>
+                <span>{tab.kind === 'stats' ? '📊' : tab.kind === 'operations' ? '⚡' : '⌗'}</span>
                 <span
                   style={{
                     overflow: 'hidden',
@@ -335,6 +357,10 @@ export default function App() {
         ) : null}
 
         {activeTab?.kind === 'stats' ? <StatsView key={activeTab.id} tab={activeTab} /> : null}
+
+        {activeTab?.kind === 'operations' ? (
+          <OperationsView key={activeTab.id} tab={activeTab} />
+        ) : null}
 
         {!activeTab ? (
           <EmptyState

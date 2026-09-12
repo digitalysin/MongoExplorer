@@ -1102,6 +1102,33 @@ textarea.input {
   overflow: auto;
 }
 
+.ops-controls {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 0 18px 12px;
+}
+
+/* Fixed widths, so a long command cannot push the Stop button off the panel. */
+.ops-table {
+  table-layout: fixed;
+  width: 100%;
+}
+
+.ops-table td {
+  vertical-align: top;
+}
+
+/* A long command in a fixed table cell: show what fits, keep the rest in the title. */
+.truncate-cell {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Small, permanent labels: what a connection is, not what it is doing. */
 .tag {
   flex: 0 0 auto;

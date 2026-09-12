@@ -85,6 +85,13 @@ const api: RendererApi = {
   query: {
     run: (request: QueryRequest) => invoke('query:run', request)
   },
+  ops: {
+    current: (connectionId: string, options?: { includeIdle?: boolean }) =>
+      invoke('ops:current', connectionId, options),
+    kill: (connectionId: string, opid: string) => invoke('ops:kill', connectionId, opid),
+    profiler: (connectionId: string, database: string, limit?: number) =>
+      invoke('ops:profiler', connectionId, database, limit)
+  },
   library: {
     history: (limit?: number) => invoke('library:history', limit),
     clearHistory: () => invoke('library:clearHistory'),

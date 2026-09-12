@@ -31,6 +31,11 @@ import {
   testConnection
 } from './services/pool.js';
 import { assertWritable } from './services/guards.js';
+import {
+  currentOperations,
+  killOperation,
+  profilerSnapshot
+} from './services/operations.js';
 import { runQuery } from './services/query.js';
 import {
   collectionStats,
@@ -340,6 +345,17 @@ export function registerIpcHandlers(): void {
     }
     return runTool(request, broadcast);
   });
+
+  handle('ops:current', (connectionId: string, options?: { includeIdle?: boolean }) =>
+    currentOperations(connectionId, options ?? {})
+  );
+  handle('ops:kill', async (connectionId: string, opid: string) => {
+    await killOperation(connectionId, opid);
+    return null;
+  });
+  handle('ops:profiler', (connectionId: string, database: string, limit?: number) =>
+    profilerSnapshot(connectionId, database, limit)
+  );
 
   handle('settings:get', () => loadSettings());
   handle('settings:update', (patch: Partial<AppSettings>) => {

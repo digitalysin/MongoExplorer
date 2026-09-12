@@ -149,6 +149,43 @@ export interface ServerInfo {
   modules: string[];
 }
 
+/** One operation the deployment is running right now. */
+export interface RunningOperation {
+  opid: string;
+  active: boolean;
+  secondsRunning: number | null;
+  op: string | null;
+  namespace: string | null;
+  /** A one-line version of the command document. */
+  command: string | null;
+  planSummary: string | null;
+  client: string | null;
+  appName: string | null;
+  waitingForLock: boolean;
+  description: string | null;
+}
+
+/** One operation the profiler recorded as slow. */
+export interface SlowOperation {
+  at: string;
+  millis: number;
+  op: string | null;
+  namespace: string | null;
+  planSummary: string | null;
+  command: string | null;
+  documentsExamined: number | null;
+  keysExamined: number | null;
+  returned: number | null;
+}
+
+export interface ProfilerSnapshot {
+  database: string;
+  /** 0 off, 1 slow operations only, 2 everything. */
+  level: number;
+  slowMs: number;
+  operations: SlowOperation[];
+}
+
 export type QueryResultKind = 'documents' | 'value' | 'acknowledgement' | 'empty';
 
 export interface QueryResult {
@@ -464,6 +501,18 @@ export interface RendererApi {
   };
   query: {
     run(request: QueryRequest): Promise<Result<QueryResult>>;
+  };
+  ops: {
+    current(
+      connectionId: string,
+      options?: { includeIdle?: boolean }
+    ): Promise<Result<RunningOperation[]>>;
+    kill(connectionId: string, opid: string): Promise<Result<null>>;
+    profiler(
+      connectionId: string,
+      database: string,
+      limit?: number
+    ): Promise<Result<ProfilerSnapshot>>;
   };
   library: {
     history(limit?: number): Promise<Result<QueryHistoryEntry[]>>;

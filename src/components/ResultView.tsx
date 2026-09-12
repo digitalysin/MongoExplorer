@@ -74,12 +74,15 @@ function clipboardText(value: unknown): string {
 export function ResultView({
   result,
   mode,
-  edit
+  edit,
+  rowOffset = 0
 }: {
   result: QueryResult;
   mode: ResultMode;
   /** Absent when the result is not tied to a single editable collection. */
   edit?: ResultEditContext;
+  /** Documents skipped before this page, so the row numbers keep counting. */
+  rowOffset?: number;
 }) {
   const store = useStore();
   const [inspected, setInspected] = useState<unknown>(null);
@@ -507,7 +510,7 @@ export function ResultView({
                     style={editable ? { cursor: 'pointer' } : undefined}
                   >
                     {editable ? '✎ ' : ''}
-                    {index + 1}
+                    {rowOffset + index + 1}
                   </td>
                   {columns.map((column) => {
                     const value = row?.[column];

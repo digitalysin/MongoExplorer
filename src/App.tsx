@@ -88,6 +88,7 @@ export default function App() {
         collection,
         code: code ?? (collection ? `db.getCollection("${collection}").find({})` : 'db.stats()'),
         limit,
+        page: 0,
         result: null,
         error: null,
         running: false

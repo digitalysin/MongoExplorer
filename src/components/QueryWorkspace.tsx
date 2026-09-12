@@ -20,6 +20,8 @@ export interface QueryTabState {
   collection: string | null;
   code: string;
   limit: number;
+  /** Which page of results is on screen; 0 is the first. */
+  page: number;
   result: QueryResult | null;
   error: string | null;
   running: boolean;
@@ -53,8 +55,8 @@ export function QueryWorkspace({
   const environment = connection?.environment ?? 'development';
 
   const execute = useCallback(
-    async (code: string, explain: 'executionStats' | null) => {
-      onPatch({ running: true, error: null });
+    async (code: string, explain: 'executionStats' | null, page = 0) => {
+      onPatch({ running: true, error: null, page });
       try {
         const result = await unwrap(
           api.query.run({
@@ -62,6 +64,7 @@ export function QueryWorkspace({
             database: tab.database,
             code,
             limit: tab.limit,
+            skip: page * tab.limit,
             explain
           })
         );
@@ -73,6 +76,12 @@ export function QueryWorkspace({
     },
     [onPatch, tab.connectionId, tab.database, tab.limit]
   );
+
+  /**
+   * Paging re-runs the query with a larger skip. The rows are fetched rather
+   * than held in memory, so a page costs one query and nothing else.
+   */
+  const goToPage = (page: number) => void execute(tab.code, null, Math.max(page, 0));
 
   /**
    * Nothing reaches the deployment through this function without the user
@@ -313,7 +322,30 @@ export function QueryWorkspace({
                   {tab.result.database}.{tab.result.collection}
                 </span>
               ) : null}
-              {tab.result.truncated ? (
+              {tab.result.kind === 'documents' && (tab.page > 0 || tab.result.truncated) ? (
+                <span className="row" style={{ gap: 6 }}>
+                  <Button
+                    size="sm"
+                    disabled={tab.page === 0 || tab.running}
+                    onClick={() => goToPage(tab.page - 1)}
+                    title="Previous page"
+                  >
+                    ‹
+                  </Button>
+                  <span className="faint">
+                    rows {formatNumber(tab.page * tab.limit + 1)}–
+                    {formatNumber(tab.page * tab.limit + tab.result.totalReturned)}
+                  </span>
+                  <Button
+                    size="sm"
+                    disabled={!tab.result.truncated || tab.running}
+                    onClick={() => goToPage(tab.page + 1)}
+                    title="Next page"
+                  >
+                    ›
+                  </Button>
+                </span>
+              ) : tab.result.truncated ? (
                 <Badge tone="amber">Truncated at the limit — raise it to see more</Badge>
               ) : null}
               {tab.result.explain ? <Badge tone="blue">Explain plan</Badge> : null}
@@ -334,7 +366,12 @@ export function QueryWorkspace({
         <div className="result-body">
           {tab.error ? <div className="error-box">{tab.error}</div> : null}
           {!tab.error && tab.result ? (
-            <ResultView result={tab.result} mode={mode} edit={editContext} />
+            <ResultView
+              result={tab.result}
+              mode={mode}
+              edit={editContext}
+              rowOffset={tab.page * tab.limit}
+            />
           ) : null}
           {!tab.error && !tab.result ? (
             <EmptyState

@@ -104,7 +104,8 @@ async function cellEvent(
   window: BrowserWindow,
   row: number,
   column: string,
-  type: 'dblclick' | 'contextmenu'
+  type: 'click' | 'dblclick' | 'contextmenu',
+  modifiers: { shiftKey?: boolean; metaKey?: boolean } = {}
 ): Promise<{ ok: boolean; reason?: string; text?: string }> {
   return window.webContents.executeJavaScript(`
     (() => {
@@ -118,9 +119,34 @@ async function cellEvent(
       cell.dispatchEvent(new MouseEvent(${JSON.stringify(type)}, {
         bubbles: true,
         clientX: Math.round(box.left + 8),
-        clientY: Math.round(box.top + 8)
+        clientY: Math.round(box.top + 8),
+        ...${JSON.stringify(modifiers)}
       }));
       return { ok: true, text: cell.textContent };
+    })()
+  `);
+}
+
+/** Clicks the row-number cell, which is how whole documents are selected. */
+async function clickRowNumber(
+  window: BrowserWindow,
+  row: number,
+  modifiers: { shiftKey?: boolean; metaKey?: boolean } = {},
+  type: 'click' | 'contextmenu' = 'click'
+): Promise<boolean> {
+  return window.webContents.executeJavaScript(`
+    (() => {
+      const tr = document.querySelectorAll('.data-table tbody tr')[${row}];
+      if (!tr) return false;
+      const cell = tr.children[0];
+      const box = cell.getBoundingClientRect();
+      cell.dispatchEvent(new MouseEvent(${JSON.stringify(type)}, {
+        bubbles: true,
+        clientX: Math.round(box.left + 8),
+        clientY: Math.round(box.top + 8),
+        ...${JSON.stringify(modifiers)}
+      }));
+      return true;
     })()
   `);
 }
@@ -671,7 +697,6 @@ async function main(): Promise<void> {
     throw new Error(`"Set to null" did not write null: status is ${String(nulled?.status)}`);
   }
   await orders.updateOne({ reference }, { $set: { status: 'paid' } });
-  await verifier.close();
 
   // A throwaway tab, so the screenshots below keep showing the unfiltered query.
   console.log('  filtering by a clicked value…');
@@ -695,6 +720,110 @@ async function main(): Promise<void> {
     throw new Error('the filtered result still holds other statuses');
   }
   await shoot(window, '09e-filtered-by-value');
+
+  console.log('  editing a column across several documents at once…');
+  // The table is showing the documents the filter matched, all of them pending.
+  const chosen = [
+    (await cellText(window, 0, 'reference')).trim(),
+    (await cellText(window, 1, 'reference')).trim(),
+    (await cellText(window, 2, 'reference')).trim()
+  ];
+  await cellEvent(window, 0, 'status', 'click');
+  await wait(200);
+  await cellEvent(window, 2, 'status', 'click', { shiftKey: true });
+  await wait(400);
+  const selectionBar = await textOf(window, '.selection-bar');
+  if (!selectionBar.includes('3 cells') || !selectionBar.includes('3 documents')) {
+    throw new Error(`the selection should be counted for the user: ${selectionBar || '(no bar)'}`);
+  }
+  if ((await count(window, '.data-table td.is-selected')) !== 3) {
+    throw new Error('shift-clicking should select the cells in between');
+  }
+  await shoot(window, '09e2-multi-select');
+
+  if (!(await cellEvent(window, 1, 'status', 'contextmenu')).ok) {
+    throw new Error('could not right-click inside the selection');
+  }
+  await wait(400);
+  if (!(await click(window, '.context-menu-item', 'Set “status” on 3 documents…'))) {
+    throw new Error('the selection offers no way to set the column on all of it');
+  }
+  await wait(500);
+  await fill(window, '.modal .input', 'void');
+  await wait(200);
+  await shoot(window, '09e3-multi-edit');
+  if (!(await click(window, '.modal-footer .btn', 'Set on 3 documents'))) {
+    throw new Error('the batch edit dialog has no confirm button');
+  }
+  await wait(1500);
+  const voided = await orders.countDocuments({ reference: { $in: chosen }, status: 'void' });
+  if (voided !== 3) {
+    throw new Error(`the batch edit reached ${voided} of the 3 selected documents`);
+  }
+  if ((await orders.countDocuments({ status: 'void' })) !== 3) {
+    throw new Error('the batch edit touched documents outside the selection');
+  }
+  for (const row of [0, 1, 2]) {
+    if (!(await cellText(window, row, 'status')).includes('void')) {
+      throw new Error(`row ${row} still shows its old status`);
+    }
+  }
+  const batchToast = await textOf(window, '.toast.kind-success');
+  if (!batchToast.includes('Saved “status” on 3 of 3 documents')) {
+    throw new Error(`the batch write did not confirm itself: ${batchToast || '(no toast)'}`);
+  }
+  await orders.updateMany({ status: 'void' }, { $set: { status: 'pending' } });
+
+  console.log('  deleting several documents at once…');
+  await orders.insertMany([
+    { reference: 'TMP-0001', status: 'pending', amount: 1, currency: 'IDR' },
+    { reference: 'TMP-0002', status: 'pending', amount: 2, currency: 'IDR' }
+  ]);
+  await click(window, '.toolbar .btn-primary');
+  await wait(2500);
+  const rowCount = await count(window, '.data-table tbody tr');
+  const lastRows = [rowCount - 2, rowCount - 1];
+  if ((await cellText(window, lastRows[0], 'reference')).trim() !== 'TMP-0001') {
+    throw new Error('the two throwaway documents are not the last two rows');
+  }
+  // ⌘-click and shift-click on the row numbers select whole documents.
+  await clickRowNumber(window, lastRows[0], { metaKey: true });
+  await wait(200);
+  await clickRowNumber(window, lastRows[1], { shiftKey: true });
+  await wait(400);
+  if (!(await textOf(window, '.selection-bar')).includes('2 documents')) {
+    throw new Error(
+      `selecting rows should count the documents: ${await textOf(window, '.selection-bar')}`
+    );
+  }
+  await clickRowNumber(window, lastRows[1], {}, 'contextmenu');
+  await wait(400);
+  if (!(await click(window, '.context-menu-item', 'Delete 2 documents…'))) {
+    throw new Error('a row selection offers no batch delete');
+  }
+  await wait(500);
+  if (!(await textOf(window, '.modal')).includes('2 documents will be removed')) {
+    throw new Error(`the delete dialog should say how many: ${await textOf(window, '.modal')}`);
+  }
+  await shoot(window, '09e4-multi-delete');
+  if (!(await click(window, '.modal-footer .btn', 'Delete 2 documents'))) {
+    throw new Error('the delete dialog has no confirm button');
+  }
+  await wait(1500);
+  if ((await orders.countDocuments({ reference: /^TMP-/ })) !== 0) {
+    throw new Error('the batch delete left documents behind');
+  }
+  if ((await count(window, '.data-table tbody tr')) !== rowCount - 2) {
+    throw new Error('the deleted rows are still in the table');
+  }
+  if (!(await textOf(window, '.toast.kind-success')).includes('Deleted 2 documents')) {
+    throw new Error('the batch delete did not confirm itself');
+  }
+  if ((await orders.countDocuments()) !== 250) {
+    throw new Error('the collection should be back to the 250 documents it started with');
+  }
+
+  await verifier.close();
 
   console.log('  running a query that writes…');
   const guarded = new MongoClient(`mongodb://${HOST}`);

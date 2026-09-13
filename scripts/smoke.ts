@@ -8,6 +8,7 @@
  */
 import { app } from 'electron';
 import assert from 'node:assert/strict';
+import { Int32 } from 'mongodb';
 import type { QueryResult, TransferProgress } from '../shared/types.js';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -29,6 +30,7 @@ import {
   createIndex,
   databaseStats,
   deleteDocument,
+  deleteDocuments,
   dropDatabase,
   dropIndex,
   getDocument,
@@ -36,7 +38,9 @@ import {
   insertDocument,
   listCollections,
   listDatabases,
-  replaceDocument
+  replaceDocument,
+  setFieldOnMany,
+  unsetFieldOnMany
 } from '../electron/services/stats.js';
 import {
   clearHistory,
@@ -586,6 +590,88 @@ async function main(): Promise<void> {
     await deleteDocument(ref);
     assert.equal(await db.collection('people').countDocuments({ name: 'Barbara' }), 0);
     await assert.rejects(() => deleteDocument(ref), /no longer exists/);
+  });
+
+  await check('one value can be written across a selection of documents', async () => {
+    const target = { connectionId: connection.id, database: DATABASE, collection: 'batch' };
+    await db.collection('batch').insertMany([
+      { name: 'a', score: new Int32(1), tier: 'bronze' },
+      { name: 'b', score: 2.5, tier: 'bronze' },
+      { name: 'c', score: new Int32(3), tier: 'bronze' },
+      { name: 'd', score: new Int32(4), tier: 'bronze' }
+    ]);
+    const chosen = await db.collection('batch').find({ name: { $in: ['a', 'b', 'c'] } }).toArray();
+    const idsJson = chosen.map((document) => JSON.stringify({ $oid: String(document._id) }));
+
+    const result = await setFieldOnMany({ ...target, idsJson, field: 'tier', valueJson: '"gold"' });
+    assert.equal(result.matched, 3);
+    assert.equal(result.modified, 3);
+    assert.equal(result.updates.length, 3, 'every document reports what it now stores');
+    assert.deepEqual(
+      result.updates.map((update) => update.value),
+      ['gold', 'gold', 'gold']
+    );
+    assert.equal(await db.collection('batch').countDocuments({ tier: 'gold' }), 3);
+    assert.equal(
+      await db.collection('batch').countDocuments({ name: 'd', tier: 'bronze' }),
+      1,
+      'documents outside the selection are left alone'
+    );
+  });
+
+  await check('a batch write keeps each document’s numeric type', async () => {
+    const target = { connectionId: connection.id, database: DATABASE, collection: 'batch' };
+    const chosen = await db.collection('batch').find({ name: { $in: ['a', 'b'] } }).toArray();
+    const idsJson = chosen.map((document) => JSON.stringify({ $oid: String(document._id) }));
+    // 'a' holds an int32 and 'b' a double, so one updateMany for both would
+    // have to widen one of them.
+    await setFieldOnMany({ ...target, idsJson, field: 'score', valueJson: '7' });
+    const typeOf = async (name: string) => {
+      const [row] = await db
+        .collection('batch')
+        .aggregate([{ $match: { name } }, { $project: { type: { $type: '$score' } } }])
+        .toArray();
+      return String(row?.type);
+    };
+    assert.equal(await typeOf('a'), 'int');
+    assert.equal(await typeOf('b'), 'double');
+    assert.equal((await db.collection('batch').findOne({ name: 'a' }))?.score, 7);
+    assert.equal((await db.collection('batch').findOne({ name: 'b' }))?.score, 7);
+  });
+
+  await check('a field can be unset, and documents deleted, in batches', async () => {
+    const target = { connectionId: connection.id, database: DATABASE, collection: 'batch' };
+    const all = await db.collection('batch').find({}).toArray();
+    const idsJson = all.map((document) => JSON.stringify({ $oid: String(document._id) }));
+
+    const unset = await unsetFieldOnMany({ ...target, idsJson, field: 'tier' });
+    assert.equal(unset.matched, 4);
+    assert.equal(await db.collection('batch').countDocuments({ tier: { $exists: true } }), 0);
+
+    const deleted = await deleteDocuments({ ...target, idsJson: idsJson.slice(0, 2) });
+    assert.equal(deleted.deleted, 2);
+    assert.equal(await db.collection('batch').countDocuments(), 2);
+
+    // The same ids again match nothing rather than failing.
+    assert.equal((await deleteDocuments({ ...target, idsJson: idsJson.slice(0, 2) })).deleted, 0);
+  });
+
+  await check('a batch write refuses _id and an empty selection', async () => {
+    const target = { connectionId: connection.id, database: DATABASE, collection: 'batch' };
+    const [survivor] = await db.collection('batch').find({}).toArray();
+    const idsJson = [JSON.stringify({ $oid: String(survivor._id) })];
+    await assert.rejects(
+      () => setFieldOnMany({ ...target, idsJson, field: '_id', valueJson: '"x"' }),
+      /_id of an existing document cannot be changed/
+    );
+    await assert.rejects(
+      () => setFieldOnMany({ ...target, idsJson: [], field: 'tier', valueJson: '"gold"' }),
+      /No documents were selected/
+    );
+    await assert.rejects(
+      () => deleteDocuments({ ...target, idsJson: [] }),
+      /No documents were selected/
+    );
   });
 
   await check('malformed document JSON produces a readable error', async () => {

@@ -58,6 +58,15 @@ Tools** (or let it auto-detect them from your `PATH`).
 - The field keeps the BSON type it already had — a whole number typed into a
   `double` stays a double, an `ObjectId` stays an `ObjectId` — and only the
   edited cell repaints, so the query is not re-run.
+- Edit a column across many documents at once: click a cell and shift-click
+  another (or hold Shift and use the arrow keys) to select a range, ⌘-click or
+  shift-click the row numbers to select whole documents. A bar under the table
+  counts what is selected, ⌘C copies it as tab-separated text a spreadsheet
+  understands, and a right-click sets the column on every selected document,
+  sets it to null, unsets it, or deletes them together. A batch `$set` is one
+  `updateMany` per BSON type in the selection, so an `int32` next to a `double`
+  each keep what they had; on a production connection the collection name has to
+  be typed before it runs.
 - Right-click a row for the rest: edit the document as JSON, view or copy it,
   copy a value or the `_id`, filter the query by the clicked value, set a field
   to null or unset it, duplicate the document, or delete it.

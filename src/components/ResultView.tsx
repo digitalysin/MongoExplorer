@@ -4,9 +4,21 @@ import { api, unwrap } from '../lib/api';
 import { cellEditHint, cellEditor, cellValueJson, type CellEditKind } from '../lib/cellEdit';
 import { formatCellValue, prettyJson, shellLiteral, valueType } from '../lib/format';
 import { useStore } from '../state/store';
-import { Button, ContextMenu, EmptyState, Modal, type MenuItem } from './ui';
+import {
+  Button,
+  ContextMenu,
+  EmptyState,
+  Field,
+  Modal,
+  Select,
+  TextInput,
+  TypeToConfirm,
+  type MenuItem
+} from './ui';
 
 export type ResultMode = 'table' | 'json';
+
+const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ? '' : 's'}`;
 
 /** Names one cell, for telling a cancelled edit from the next one. */
 const cellKey = (cell: CellRef) => `${cell.row}:${cell.column}`;
@@ -23,7 +35,9 @@ export interface ResultEditContext {
   onOpenDocument: (idJson: string) => void;
   /** Repaints one cell after a confirmed write; `undefined` drops the field. */
   onRowPatch: (rowIndex: number, field: string, value: unknown) => void;
-  onRowRemoved: (rowIndex: number) => void;
+  /** The same, for a whole selection, applied in one go. */
+  onRowsPatch: (patches: Array<{ row: number; field: string; value: unknown }>) => void;
+  onRowsRemoved: (rowIndexes: number[]) => void;
   /** Replaces the query with one filtering on the clicked value. */
   onFilterByValue: (field: string, literal: string) => void;
   onRefresh: () => void;
@@ -93,11 +107,19 @@ export function ResultView({
   const store = useStore();
   const [inspected, setInspected] = useState<unknown>(null);
   const [selected, setSelected] = useState<CellRef | null>(null);
+  // Where a range selection started; the selected cell is its other corner.
+  const [anchor, setAnchor] = useState<CellRef | null>(null);
   const [editing, setEditing] = useState<EditState | null>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [saving, setSaving] = useState(false);
-  const [savedCell, setSavedCell] = useState<CellRef | null>(null);
-  const [pendingDelete, setPendingDelete] = useState<{ row: number; idJson: string } | null>(null);
+  const [savedCells, setSavedCells] = useState<string[]>([]);
+  const [pendingDelete, setPendingDelete] = useState<{ rows: number[]; idsJson: string[] } | null>(
+    null
+  );
+  const [bulkEdit, setBulkEdit] = useState<{ column: string; kind: CellEditKind; draft: string } | null>(
+    null
+  );
+  const [confirmText, setConfirmText] = useState('');
   const gridRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<HTMLInputElement | HTMLSelectElement | null>(null);
   const savedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -144,6 +166,7 @@ export function ResultView({
     flushPending();
     setEditing(null);
     setSelected(null);
+    setAnchor(null);
     setMenu(null);
   }, [flushPending, rows]);
 
@@ -172,6 +195,67 @@ export function ResultView({
 
   const refForRow = (rowIndex: number): DocumentRef | null => refFor(idJsonOf(rows[rowIndex]));
 
+  /** The rectangle between the anchor and the selected cell. */
+  const range = useMemo(() => {
+    if (!selected) return null;
+    const other = anchor ?? selected;
+    const selectedIndex = columns.indexOf(selected.column);
+    const otherIndex = columns.indexOf(other.column);
+    if (selectedIndex < 0 || otherIndex < 0) return null;
+    const rowFrom = Math.min(selected.row, other.row);
+    const rowTo = Math.max(selected.row, other.row);
+    const from = Math.min(selectedIndex, otherIndex);
+    const to = Math.max(selectedIndex, otherIndex);
+    return {
+      rowFrom,
+      rowTo,
+      columnFrom: from,
+      columnTo: to,
+      rowIndexes: Array.from({ length: rowTo - rowFrom + 1 }, (_, offset) => rowFrom + offset),
+      columns: columns.slice(from, to + 1)
+    };
+  }, [anchor, columns, selected]);
+
+  const inRange = (row: number, column: string) => {
+    if (!range) return false;
+    const index = columns.indexOf(column);
+    return (
+      row >= range.rowFrom &&
+      row <= range.rowTo &&
+      index >= range.columnFrom &&
+      index <= range.columnTo
+    );
+  };
+
+  const cellsInRange = range ? range.rowIndexes.length * range.columns.length : 0;
+  /** A selection worth acting on as a batch rather than as one cell. */
+  const multi = cellsInRange > 1;
+  /** Documents the selection covers, in the order the table shows them. */
+  const selectedRows = range
+    ? range.rowIndexes.filter((row) => idJsonOf(rows[row]) !== null)
+    : [];
+  const selectedIdsJson = selectedRows.map((row) => idJsonOf(rows[row]) as string);
+  /** The one column a range covers, or null when it spans several. */
+  const singleColumn = range && range.columns.length === 1 ? range.columns[0] : null;
+
+  const selectCell = (cell: CellRef, extend: boolean) => {
+    if (extend && selected) setSelected(cell);
+    else {
+      setAnchor(cell);
+      setSelected(cell);
+    }
+  };
+
+  /** Selects whole documents, which is what the row-number column is for. */
+  const selectRow = (row: number, extend: boolean) => {
+    const first = columns[0];
+    const last = columns[columns.length - 1];
+    if (!first || !last) return;
+    setAnchor({ row: extend && anchor ? anchor.row : row, column: first });
+    setSelected({ row, column: last });
+    setEditing(null);
+  };
+
   /** Applies a confirmed write without letting it clear the cursor. */
   const applyPatch = (rowIndex: number, field: string, value: unknown) => {
     selfWriteRef.current = true;
@@ -181,10 +265,12 @@ export function ResultView({
   const hint = (message: string) => store.pushToast({ kind: 'info', message });
 
   /** Confirms the write where the user is looking, not only in the corner. */
-  const markSaved = (row: number, column: string) => {
-    setSavedCell({ row, column });
+  const markSaved = (row: number, column: string) => markManySaved([{ row, column }]);
+
+  const markManySaved = (cells: CellRef[]) => {
+    setSavedCells(cells.map(cellKey));
     if (savedTimer.current) clearTimeout(savedTimer.current);
-    savedTimer.current = setTimeout(() => setSavedCell(null), 1400);
+    savedTimer.current = setTimeout(() => setSavedCells([]), 1400);
   };
 
   const copy = async (text: string, label: string) => {
@@ -304,6 +390,119 @@ export function ResultView({
     }
   };
 
+  // A production connection asks for the collection name before a batch write.
+  const needsTypedConfirm =
+    Boolean(edit) &&
+    store.connections.find((connection) => connection.id === edit?.connectionId)?.environment ===
+      'production';
+
+  /** The selection as tab-separated text, which is what spreadsheets paste. */
+  const rangeText = () => {
+    if (!range) return '';
+    const flat = (value: unknown) => clipboardText(value).replace(/[\t\r\n]+/g, ' ');
+    return range.rowIndexes
+      .map((row) => range.columns.map((column) => flat(rows[row]?.[column])).join('\t'))
+      .join('\n');
+  };
+
+  const openBulkEdit = (column: string) => {
+    const source = rows[selected?.row ?? range?.rowFrom ?? 0]?.[column];
+    const editor = cellEditor(source);
+    if (!editor) {
+      hint(`“${column}” holds a value that needs the document editor.`);
+      return;
+    }
+    setConfirmText('');
+    setBulkEdit({ column, kind: editor.kind, draft: editor.text });
+  };
+
+  const applyBulkEdit = async (active: { column: string; kind: CellEditKind; draft: string }) => {
+    let valueJson: string;
+    try {
+      valueJson = cellValueJson(active.kind, active.draft);
+    } catch (error) {
+      store.reportError(`“${active.column}” cannot hold that value`, error);
+      return;
+    }
+    setBulkEdit(null);
+    await writeManyValues(active.column, valueJson);
+  };
+
+  const bulkTarget = () => {
+    if (!edit || selectedIdsJson.length === 0) return null;
+    return {
+      connectionId: edit.connectionId,
+      database: edit.database,
+      collection: edit.collection,
+      idsJson: selectedIdsJson
+    };
+  };
+
+  /** Writes one value across every document the selection covers. */
+  const writeManyValues = async (column: string, valueJson: string) => {
+    const target = bulkTarget();
+    if (!target) return;
+    const rowByIdJson = new Map(selectedRows.map((row) => [idJsonOf(rows[row]) as string, row]));
+    setSaving(true);
+    try {
+      const result = await unwrap(api.data.setFieldOnMany({ ...target, field: column, valueJson }));
+      const patches = result.updates
+        .map((update) => ({ row: rowByIdJson.get(update.idJson), value: update.value }))
+        .filter((patch): patch is { row: number; value: unknown } => patch.row !== undefined)
+        .map((patch) => ({ row: patch.row, field: column, value: patch.value }));
+      selfWriteRef.current = true;
+      edit?.onRowsPatch(patches);
+      markManySaved(patches.map((patch) => ({ row: patch.row, column })));
+      store.notify(
+        `Saved “${column}” on ${result.modified} of ${plural(result.matched, 'document')}`,
+        SAVE_TOAST
+      );
+    } catch (error) {
+      store.reportError(`Could not update “${column}” on the selected documents`, error);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const unsetManyValues = async (column: string) => {
+    const target = bulkTarget();
+    if (!target) return;
+    const affected = [...selectedRows];
+    try {
+      const result = await unwrap(api.data.unsetFieldOnMany({ ...target, field: column }));
+      selfWriteRef.current = true;
+      edit?.onRowsPatch(affected.map((row) => ({ row, field: column, value: undefined })));
+      markManySaved(affected.map((row) => ({ row, column })));
+      store.notify(
+        `Removed “${column}” from ${plural(result.modified, 'document')}`,
+        SAVE_TOAST
+      );
+    } catch (error) {
+      store.reportError(`Could not remove “${column}” from the selected documents`, error);
+    }
+  };
+
+  const deleteRows = async (rowIndexes: number[], idsJson: string[]) => {
+    if (!edit) return;
+    try {
+      const result = await unwrap(
+        api.data.deleteDocuments({
+          connectionId: edit.connectionId,
+          database: edit.database,
+          collection: edit.collection,
+          idsJson
+        })
+      );
+      selfWriteRef.current = true;
+      edit.onRowsRemoved(rowIndexes);
+      setSelected(null);
+      setAnchor(null);
+      store.notify(`Deleted ${plural(result.deleted, 'document')}`);
+    } catch (error) {
+      store.reportError('Could not delete the selected documents', error);
+    }
+  };
+
   const unsetValue = async (rowIndex: number, column: string) => {
     const ref = refForRow(rowIndex);
     if (!ref) return;
@@ -328,35 +527,61 @@ export function ResultView({
     }
   };
 
-  const deleteRow = async (rowIndex: number, idJson: string) => {
-    if (!edit) return;
-    try {
-      await unwrap(
-        api.data.deleteDocument({
-          connectionId: edit.connectionId,
-          database: edit.database,
-          collection: edit.collection,
-          idJson
-        })
-      );
-      selfWriteRef.current = true;
-      edit.onRowRemoved(rowIndex);
-      setSelected(null);
-      store.notify('Deleted the document');
-    } catch (error) {
-      store.reportError('Could not delete the document', error);
-    }
-  };
-
-  const askDelete = (rowIndex: number, idJson: string) => {
-    if (store.settings?.confirmDestructiveOps === false) {
-      void deleteRow(rowIndex, idJson);
+  const askDelete = (rowIndexes: number[], idsJson: string[]) => {
+    if (store.settings?.confirmDestructiveOps === false && !needsTypedConfirm) {
+      void deleteRows(rowIndexes, idsJson);
       return;
     }
-    setPendingDelete({ row: rowIndex, idJson });
+    setConfirmText('');
+    setPendingDelete({ rows: rowIndexes, idsJson });
+  };
+
+  const batchMenuItems = (): MenuItem[] => {
+    const documents = selectedIdsJson.length;
+    const items: MenuItem[] = [];
+    if (edit && documents > 0 && singleColumn && singleColumn !== '_id') {
+      items.push({
+        label: `Set “${singleColumn}” on ${plural(documents, 'document')}…`,
+        onSelect: () => openBulkEdit(singleColumn)
+      });
+      items.push({
+        label: `Set to null on ${plural(documents, 'document')}`,
+        onSelect: () => void writeManyValues(singleColumn, 'null')
+      });
+      items.push({
+        label: `Unset “${singleColumn}” on ${plural(documents, 'document')}`,
+        onSelect: () => void unsetManyValues(singleColumn)
+      });
+      items.push({ separator: true });
+    }
+    items.push({
+      label: `Copy ${plural(cellsInRange, 'cell')}`,
+      hint: '⌘C',
+      onSelect: () => void copy(rangeText(), 'the selected cells')
+    });
+    items.push({
+      label: `Copy ${plural(documents, 'document')}`,
+      disabled: documents === 0,
+      onSelect: () =>
+        void copy(prettyJson(selectedRows.map((row) => rows[row])), 'the selected documents')
+    });
+    if (edit && documents > 0) {
+      items.push({ separator: true });
+      items.push({
+        label: `Delete ${plural(documents, 'document')}…`,
+        danger: true,
+        onSelect: () => askDelete(selectedRows, selectedIdsJson)
+      });
+    }
+    if (edit) {
+      items.push({ separator: true });
+      items.push({ label: 'Re-run the query', onSelect: edit.onRefresh });
+    }
+    return items;
   };
 
   const menuItems = (target: MenuState): MenuItem[] => {
+    if (multi) return batchMenuItems();
     const row = rows[target.row];
     const idJson = idJsonOf(row);
     const column = target.column;
@@ -420,7 +645,7 @@ export function ResultView({
       items.push({
         label: 'Delete document…',
         danger: true,
-        onSelect: () => askDelete(target.row, idJson)
+        onSelect: () => askDelete([target.row], [idJson])
       });
     }
 
@@ -434,7 +659,9 @@ export function ResultView({
   const openMenu = (event: ReactMouseEvent, row: number, column: string | null) => {
     event.preventDefault();
     event.stopPropagation();
-    if (column) setSelected({ row, column });
+    // A right-click inside the selection acts on it; outside it, it starts anew.
+    if (column && !inRange(row, column)) selectCell({ row, column }, false);
+    else if (!column && !range?.rowIndexes.includes(row)) selectRow(row, false);
     setMenu({ x: event.clientX, y: event.clientY, row, column });
   };
 
@@ -454,25 +681,30 @@ export function ResultView({
     }
     if (editing || !selected) return;
     const columnIndex = columns.indexOf(selected.column);
+    // Shift keeps the anchor where it is, which is how a range grows.
     const move = (rowDelta: number, columnDelta: number) => {
       event.preventDefault();
-      setSelected({
+      const cell = {
         row: Math.min(Math.max(selected.row + rowDelta, 0), rows.length - 1),
         column: columns[Math.min(Math.max(columnIndex + columnDelta, 0), columns.length - 1)]
-      });
+      };
+      selectCell(cell, event.shiftKey);
     };
 
     if (event.key === 'ArrowDown') move(1, 0);
     else if (event.key === 'ArrowUp') move(-1, 0);
     else if (event.key === 'ArrowRight') move(0, 1);
     else if (event.key === 'ArrowLeft') move(0, -1);
-    else if (event.key === 'Escape') setSelected(null);
-    else if (event.key === 'Enter' || event.key === 'F2') {
+    else if (event.key === 'Escape') {
+      setSelected(null);
+      setAnchor(null);
+    } else if (event.key === 'Enter' || event.key === 'F2') {
       event.preventDefault();
       startEdit(selected.row, selected.column);
     } else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'c') {
       event.preventDefault();
-      void copy(clipboardText(rows[selected.row]?.[selected.column]), 'the cell value');
+      if (multi) void copy(rangeText(), `${plural(cellsInRange, 'cell')}`);
+      else void copy(clipboardText(rows[selected.row]?.[selected.column]), 'the cell value');
     }
   };
 
@@ -610,9 +842,23 @@ export function ResultView({
               return (
                 <tr key={index} className={menu?.row === index ? 'is-menu-target' : ''}>
                   <td
-                    className="cell-index"
-                    title={editable ? 'Edit this document' : undefined}
-                    onClick={() => editable && edit?.onOpenDocument(idJson as string)}
+                    className={`cell-index ${
+                      range?.rowIndexes.includes(index) && range.columns.length === columns.length
+                        ? 'is-selected'
+                        : ''
+                    }`}
+                    title={
+                      editable
+                        ? 'Click to edit this document · ⌘-click or shift-click to select rows'
+                        : undefined
+                    }
+                    onClick={(event) => {
+                      if (event.metaKey || event.ctrlKey || event.shiftKey) {
+                        selectRow(index, event.shiftKey);
+                        return;
+                      }
+                      if (editable) edit?.onOpenDocument(idJson as string);
+                    }}
                     onContextMenu={(event) => openMenu(event, index, null)}
                     style={editable ? { cursor: 'pointer' } : undefined}
                   >
@@ -623,15 +869,16 @@ export function ResultView({
                     const value = row?.[column];
                     const type = valueType(value);
                     const expandable = value !== null && typeof value === 'object';
-                    const isSelected = selected?.row === index && selected.column === column;
+                    const isSelected = inRange(index, column);
+                    const isFocus = selected?.row === index && selected.column === column;
                     const isEditing = editing?.row === index && editing.column === column;
-                    const justSaved = savedCell?.row === index && savedCell.column === column;
+                    const justSaved = savedCells.includes(cellKey({ row: index, column }));
                     return (
                       <td
                         key={column}
                         className={`${isSelected ? 'is-selected' : ''} ${
-                          isEditing ? 'is-editing' : ''
-                        } ${justSaved ? 'is-saved' : ''}`}
+                          isFocus ? 'is-focus' : ''
+                        } ${isEditing ? 'is-editing' : ''} ${justSaved ? 'is-saved' : ''}`}
                         title={
                           isEditing
                             ? undefined
@@ -639,8 +886,9 @@ export function ResultView({
                               ? 'Double-click to inspect'
                               : formatCellValue(value)
                         }
-                        onClick={() => {
-                          if (!isEditing) setSelected({ row: index, column });
+                        onClick={(event) => {
+                          if (isEditing) return;
+                          selectCell({ row: index, column }, event.shiftKey);
                         }}
                         onContextMenu={(event) => openMenu(event, index, column)}
                         onDoubleClick={(event) => {
@@ -669,6 +917,17 @@ export function ResultView({
         </table>
       </div>
 
+      {multi ? (
+        <div className="selection-bar">
+          <strong>{plural(cellsInRange, 'cell')}</strong> selected across{' '}
+          <strong>{plural(selectedIdsJson.length, 'document')}</strong>
+          <span className="spacer" />
+          <span className="dim">
+            ⌘C copies the selection · right-click to edit or delete them together
+          </span>
+        </div>
+      ) : null}
+
       {menu ? (
         <ContextMenu
           x={menu.x}
@@ -686,9 +945,67 @@ export function ResultView({
         </Modal>
       ) : null}
 
+      {bulkEdit ? (
+        <Modal
+          title={`Set “${bulkEdit.column}” on ${plural(selectedIdsJson.length, 'document')}`}
+          subtitle={cellEditHint(bulkEdit.kind)}
+          onClose={() => setBulkEdit(null)}
+          width={460}
+          footer={
+            <>
+              <span className="spacer" />
+              <Button onClick={() => setBulkEdit(null)}>Cancel</Button>
+              <Button
+                variant="primary"
+                disabled={saving || (needsTypedConfirm && confirmText !== edit?.collection)}
+                onClick={() => void applyBulkEdit(bulkEdit)}
+              >
+                {`Set on ${plural(selectedIdsJson.length, 'document')}`}
+              </Button>
+            </>
+          }
+        >
+          <Field
+            label={bulkEdit.column}
+            hint={`Written with one $set across ${plural(selectedIdsJson.length, 'document')}.${
+              bulkEdit.kind === 'number'
+                ? ' Each document keeps the numeric type its field already holds.'
+                : ''
+            }`}
+          >
+            {bulkEdit.kind === 'boolean' ? (
+              <Select
+                value={bulkEdit.draft}
+                onChange={(event) => setBulkEdit({ ...bulkEdit, draft: event.target.value })}
+              >
+                <option value="true">true</option>
+                <option value="false">false</option>
+              </Select>
+            ) : (
+              <TextInput
+                autoFocus
+                spellCheck={false}
+                value={bulkEdit.draft}
+                onChange={(event) => setBulkEdit({ ...bulkEdit, draft: event.target.value })}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' && !needsTypedConfirm) void applyBulkEdit(bulkEdit);
+                }}
+              />
+            )}
+          </Field>
+          {needsTypedConfirm ? (
+            <TypeToConfirm
+              word={edit?.collection ?? ''}
+              value={confirmText}
+              onChange={setConfirmText}
+            />
+          ) : null}
+        </Modal>
+      ) : null}
+
       {pendingDelete ? (
         <Modal
-          title="Delete document"
+          title={pendingDelete.idsJson.length === 1 ? 'Delete document' : 'Delete documents'}
           onClose={() => setPendingDelete(null)}
           width={460}
           footer={
@@ -697,24 +1014,36 @@ export function ResultView({
               <Button onClick={() => setPendingDelete(null)}>Cancel</Button>
               <Button
                 variant="danger"
+                disabled={needsTypedConfirm && confirmText !== edit?.collection}
                 onClick={() => {
                   const target = pendingDelete;
                   setPendingDelete(null);
-                  void deleteRow(target.row, target.idJson);
+                  void deleteRows(target.rows, target.idsJson);
                 }}
               >
-                Delete
+                {pendingDelete.idsJson.length === 1
+                  ? 'Delete'
+                  : `Delete ${plural(pendingDelete.idsJson.length, 'document')}`}
               </Button>
             </>
           }
         >
           <p style={{ margin: 0, lineHeight: 1.6 }}>
-            Row {pendingDelete.row + 1} will be removed from{' '}
+            {pendingDelete.idsJson.length === 1
+              ? `Row ${rowOffset + pendingDelete.rows[0] + 1} will be removed from `
+              : `${plural(pendingDelete.idsJson.length, 'document')} will be removed from `}
             <span className="mono">
               {edit?.database}.{edit?.collection}
             </span>
             . This cannot be undone.
           </p>
+          {needsTypedConfirm ? (
+            <TypeToConfirm
+              word={edit?.collection ?? ''}
+              value={confirmText}
+              onChange={setConfirmText}
+            />
+          ) : null}
         </Modal>
       ) : null}
     </>

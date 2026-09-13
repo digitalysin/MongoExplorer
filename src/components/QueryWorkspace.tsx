@@ -176,10 +176,32 @@ export function QueryWorkspace({
     onPatch({ result: { ...result, documents, columns } });
   };
 
-  const removeRow = (rowIndex: number) => {
+  /**
+   * One patch for a whole selection. Patching row by row would each time start
+   * from the result this render captured, so only the last one would survive.
+   */
+  const patchRows = (patches: Array<{ row: number; field: string; value: unknown }>) => {
     const result = tab.result;
     if (!result) return;
-    const documents = result.documents.filter((_, index) => index !== rowIndex);
+    const byRow = new Map(patches.map((patch) => [patch.row, patch]));
+    const documents = result.documents.map((document, index) => {
+      const patch = byRow.get(index);
+      if (!patch) return document;
+      const next = { ...(document as Record<string, unknown>) };
+      if (patch.value === undefined) delete next[patch.field];
+      else next[patch.field] = patch.value;
+      return next;
+    });
+    const fields = patches.map((patch) => patch.field);
+    const columns = [...result.columns, ...fields.filter((field) => !result.columns.includes(field))];
+    onPatch({ result: { ...result, documents, columns } });
+  };
+
+  const removeRows = (rowIndexes: number[]) => {
+    const result = tab.result;
+    if (!result) return;
+    const dropped = new Set(rowIndexes);
+    const documents = result.documents.filter((_, index) => !dropped.has(index));
     onPatch({ result: { ...result, documents, totalReturned: documents.length } });
   };
 
@@ -206,7 +228,8 @@ export function QueryWorkspace({
               idJson
             }),
           onRowPatch: patchRow,
-          onRowRemoved: removeRow,
+          onRowsPatch: patchRows,
+          onRowsRemoved: removeRows,
           onFilterByValue: filterByValue,
           onRefresh: () => void run()
         }

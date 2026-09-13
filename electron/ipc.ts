@@ -3,6 +3,8 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import type {
   AppSettings,
+  BulkDocumentsRequest,
+  BulkFieldRequest,
   ConnectionConfig,
   ConnectionSecrets,
   CreateIndexRequest,
@@ -44,6 +46,7 @@ import {
   createIndex,
   databaseStats,
   deleteDocument,
+  deleteDocuments,
   dropCollection,
   dropDatabase,
   dropIndex,
@@ -55,7 +58,9 @@ import {
   listDatabases,
   replaceDocument,
   setDocumentField,
-  unsetDocumentField
+  setFieldOnMany,
+  unsetDocumentField,
+  unsetFieldOnMany
 } from './services/stats.js';
 import {
   clearHistory,
@@ -116,6 +121,9 @@ const WRITE_CHANNELS = new Set([
   'data:setDocumentField',
   'data:unsetDocumentField',
   'data:duplicateDocument',
+  'data:setFieldOnMany',
+  'data:unsetFieldOnMany',
+  'data:deleteDocuments',
   'transfer:import',
   'ops:kill'
 ]);
@@ -345,6 +353,12 @@ export function registerIpcHandlers(): void {
     }
     return runTool(request, broadcast);
   });
+
+  handle('data:setFieldOnMany', (request: BulkFieldRequest) => setFieldOnMany(request));
+  handle('data:unsetFieldOnMany', (request: BulkDocumentsRequest & { field: string }) =>
+    unsetFieldOnMany(request)
+  );
+  handle('data:deleteDocuments', (request: BulkDocumentsRequest) => deleteDocuments(request));
 
   handle('ops:current', (connectionId: string, options?: { includeIdle?: boolean }) =>
     currentOperations(connectionId, options ?? {})

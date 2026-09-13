@@ -1,6 +1,8 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type {
   AppSettings,
+  BulkDocumentsRequest,
+  BulkFieldRequest,
   ConnectionConfig,
   ConnectionSecrets,
   CreateIndexRequest,
@@ -80,6 +82,10 @@ const api: RendererApi = {
       invoke('data:setDocumentField', ref, field, valueJson),
     unsetDocumentField: (ref: DocumentRef, field: string) =>
       invoke('data:unsetDocumentField', ref, field),
+    setFieldOnMany: (request: BulkFieldRequest) => invoke('data:setFieldOnMany', request),
+    unsetFieldOnMany: (request: BulkDocumentsRequest & { field: string }) =>
+      invoke('data:unsetFieldOnMany', request),
+    deleteDocuments: (request: BulkDocumentsRequest) => invoke('data:deleteDocuments', request),
     duplicateDocument: (ref: DocumentRef) => invoke('data:duplicateDocument', ref)
   },
   query: {

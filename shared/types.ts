@@ -255,6 +255,28 @@ export interface DocumentRef {
   idJson: string;
 }
 
+/** Several documents in one collection, addressed by their `_id`s. */
+export interface BulkDocumentsRequest {
+  connectionId: string;
+  database: string;
+  collection: string;
+  /** Canonical EJSON of each document's `_id`. */
+  idsJson: string[];
+}
+
+export interface BulkFieldRequest extends BulkDocumentsRequest {
+  field: string;
+  /** Canonical EJSON of the value to write. */
+  valueJson: string;
+}
+
+export interface BulkWriteResult {
+  matched: number;
+  modified: number;
+  /** What each document now stores, as relaxed EJSON, for repainting the table. */
+  updates: Array<{ idJson: string; value: unknown }>;
+}
+
 export interface QueryHistoryEntry {
   id: string;
   connectionId: string;
@@ -496,6 +518,12 @@ export interface RendererApi {
     ): Promise<Result<{ value: unknown }>>;
     /** Removes one field with `$unset`. */
     unsetDocumentField(ref: DocumentRef, field: string): Promise<Result<null>>;
+    /** The same `$set`, across a selection of documents. */
+    setFieldOnMany(request: BulkFieldRequest): Promise<Result<BulkWriteResult>>;
+    unsetFieldOnMany(
+      request: BulkDocumentsRequest & { field: string }
+    ): Promise<Result<{ matched: number; modified: number }>>;
+    deleteDocuments(request: BulkDocumentsRequest): Promise<Result<{ deleted: number }>>;
     /** Inserts a copy of the document under a fresh `_id`. */
     duplicateDocument(ref: DocumentRef): Promise<Result<{ insertedId: unknown }>>;
   };

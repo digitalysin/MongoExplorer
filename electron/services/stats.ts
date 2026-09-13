@@ -9,6 +9,9 @@ import {
   type IndexSpecification
 } from 'mongodb';
 import type {
+  BulkDocumentsRequest,
+  BulkFieldRequest,
+  BulkWriteResult,
   CollectionStats,
   CollectionSummary,
   CreateIndexRequest,
@@ -409,6 +412,86 @@ export async function unsetDocumentField(ref: DocumentRef, field: string): Promi
     .collection(ref.collection)
     .updateOne({ _id: parseId(ref.idJson) } as Document, { $unset: { [field]: '' } });
   if (result.matchedCount === 0) throw new Error('That document no longer exists.');
+}
+
+/** One key per `_id`, so ids from a query can be matched to ids from the user. */
+function idKey(id: unknown): string {
+  return EJSON.stringify(id as never, { relaxed: false });
+}
+
+/**
+ * Writes one field across a selection of documents. The value is re-wrapped per
+ * document the way `setDocumentField` does it, which means the documents are
+ * grouped by the type the field holds today — otherwise a selection mixing an
+ * int32 and a double would come out all double.
+ */
+export async function setFieldOnMany(request: BulkFieldRequest): Promise<BulkWriteResult> {
+  assertEditableField(request.field);
+  if (request.idsJson.length === 0) throw new Error('No documents were selected.');
+
+  const collection = getDb(request.connectionId, request.database).collection(request.collection);
+  const wanted = request.idsJson.map((idJson) => ({ idJson, id: parseId(idJson) }));
+  const current = await collection
+    .aggregate([
+      { $match: { _id: { $in: wanted.map((entry) => entry.id) } } },
+      { $project: { type: { $type: `$${request.field}` } } }
+    ])
+    .toArray();
+  if (current.length === 0) throw new Error('None of those documents exist any more.');
+
+  const raw = parseValue(request.valueJson);
+  const byType = new Map<string, unknown[]>();
+  for (const entry of current) {
+    const type = String(entry.type);
+    byType.set(type, [...(byType.get(type) ?? []), entry._id]);
+  }
+
+  let matched = 0;
+  let modified = 0;
+  const storedByType = new Map<string, unknown>();
+  for (const [type, ids] of byType) {
+    const value = keepNumericType(raw, type);
+    storedByType.set(type, value);
+    const result = await collection.updateMany({ _id: { $in: ids } } as Document, {
+      $set: { [request.field]: value }
+    });
+    matched += result.matchedCount;
+    modified += result.modifiedCount;
+  }
+
+  const typeByKey = new Map(current.map((entry) => [idKey(entry._id), String(entry.type)]));
+  const updates = wanted
+    .map((entry) => ({ entry, type: typeByKey.get(idKey(entry.id)) }))
+    .filter((pair): pair is { entry: (typeof wanted)[number]; type: string } => Boolean(pair.type))
+    .map((pair) => ({
+      idJson: pair.entry.idJson,
+      value: serializeValue(storedByType.get(pair.type))
+    }));
+
+  return { matched, modified, updates };
+}
+
+export async function unsetFieldOnMany(
+  request: BulkDocumentsRequest & { field: string }
+): Promise<{ matched: number; modified: number }> {
+  assertEditableField(request.field);
+  if (request.idsJson.length === 0) throw new Error('No documents were selected.');
+  const ids = request.idsJson.map(parseId);
+  const result = await getDb(request.connectionId, request.database)
+    .collection(request.collection)
+    .updateMany({ _id: { $in: ids } } as Document, { $unset: { [request.field]: '' } });
+  return { matched: result.matchedCount, modified: result.modifiedCount };
+}
+
+export async function deleteDocuments(
+  request: BulkDocumentsRequest
+): Promise<{ deleted: number }> {
+  if (request.idsJson.length === 0) throw new Error('No documents were selected.');
+  const ids = request.idsJson.map(parseId);
+  const result = await getDb(request.connectionId, request.database)
+    .collection(request.collection)
+    .deleteMany({ _id: { $in: ids } } as Document);
+  return { deleted: result.deletedCount };
 }
 
 /** Inserts a copy of the document; the copy gets a freshly generated `_id`. */

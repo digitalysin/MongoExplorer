@@ -46,10 +46,18 @@ Tools** (or let it auto-detect them from your `PATH`).
 ![Document editor](docs/screenshot-document-editor.png)
 
 - Edit a cell in place: double-click it (or select it and press Enter), type, and
-  press Enter to write just that field with `$set`. Tab moves to the next cell,
-  Escape cancels. The field keeps the BSON type it already had — a whole number
-  typed into a `double` stays a double, an `ObjectId` stays an `ObjectId` — and
-  only the edited cell repaints, so the query is not re-run.
+  it is written with `$set` as soon as you move on — Enter, Tab to the next cell,
+  or simply clicking another column. Escape cancels that cell.
+- Nothing has to be remembered: an unwritten change outlines the cell in amber,
+  ⌘S (Ctrl+S) saves it without closing the editor so you can keep typing, and an
+  edit still in the box is written rather than discarded if you re-run the query,
+  switch to the JSON view, or close the tab. Each save is confirmed in the cell
+  itself with a brief flash and by one toast in the corner that updates rather
+  than piling up; a rejected value stops you with a dialog and leaves the editor
+  open so it can be fixed. ⌘S saves the JSON document editor too.
+- The field keeps the BSON type it already had — a whole number typed into a
+  `double` stays a double, an `ObjectId` stays an `ObjectId` — and only the
+  edited cell repaints, so the query is not re-run.
 - Right-click a row for the rest: edit the document as JSON, view or copy it,
   copy a value or the `_id`, filter the query by the clicked value, set a field
   to null or unset it, duplicate the document, or delete it.

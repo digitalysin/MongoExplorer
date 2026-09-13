@@ -28,6 +28,11 @@ export interface Toast {
   kind: 'info' | 'success';
   message: string;
   detail?: string;
+  /**
+   * Replaces any toast already on screen with the same key. Saving one cell
+   * after another should read as one running confirmation, not a pile of them.
+   */
+  key?: string;
 }
 
 export interface ErrorReport {
@@ -68,7 +73,7 @@ interface StoreValue {
   pushToast: (toast: Omit<Toast, 'id'>) => void;
   dismissToast: (id: string) => void;
   /** Confirms a finished operation without interrupting anyone. */
-  notify: (message: string) => void;
+  notify: (message: string, key?: string) => void;
   /** Stops the user with what failed and why. */
   reportError: (message: string, error?: unknown) => void;
   dismissError: () => void;
@@ -98,7 +103,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const pushToast = useCallback((toast: Omit<Toast, 'id'>) => {
     toastCounter.current += 1;
     const id = `toast-${toastCounter.current}`;
-    setToasts((current) => [...current, { ...toast, id }]);
+    setToasts((current) => [
+      ...(toast.key ? current.filter((entry) => entry.key !== toast.key) : current),
+      { ...toast, id }
+    ]);
     setTimeout(() => setToasts((current) => current.filter((entry) => entry.id !== id)), 4000);
   }, []);
 
@@ -107,7 +115,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const notify = useCallback(
-    (message: string) => pushToast({ kind: 'success', message }),
+    (message: string, key?: string) => pushToast({ kind: 'success', message, key }),
     [pushToast]
   );
 

@@ -64,7 +64,7 @@ export function DocumentEditor({
     try {
       if (ref) {
         await unwrap(api.data.replaceDocument(ref, text));
-        store.notify(`Saved the document in ${target.collection}`);
+        store.notify(`Saved the document in ${target.collection}`, 'document-save');
       } else {
         await unwrap(
           api.data.insertDocument(target.connectionId, target.database, target.collection, text)
@@ -139,6 +139,13 @@ export function DocumentEditor({
           style={{ minHeight: 380, fontSize: 12.5, lineHeight: 1.55 }}
           spellCheck={false}
           value={text}
+          onKeyDown={(event) => {
+            // The same keystroke as the table: ⌘S / Ctrl+S writes the document.
+            if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') {
+              event.preventDefault();
+              if (!busy && !loading) void save();
+            }
+          }}
           onChange={(event) => {
             setText(event.target.value);
             setDirty(true);

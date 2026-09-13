@@ -351,7 +351,8 @@ export function QueryWorkspace({
               {tab.result.explain ? <Badge tone="blue">Explain plan</Badge> : null}
               {editContext && mode === 'table' ? (
                 <span className="faint">
-                  Double-click a cell to edit it · right-click a row for more
+                  Double-click a cell to edit it · saved when you move on, or with ⌘S ·
+                  right-click a row for more
                 </span>
               ) : null}
             </>

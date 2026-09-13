@@ -533,6 +533,32 @@ select.cell-editor {
   opacity: 0.6;
 }
 
+/* An edit that has not reached the collection yet, and one on its way. */
+.cell-editor.is-dirty {
+  outline-color: var(--amber);
+}
+
+.cell-editor.is-saving {
+  outline-color: var(--text-dim);
+}
+
+/* The confirmation belongs where the user is looking, not only in the corner. */
+.data-table td.is-saved {
+  animation: cell-saved 1.4s ease-out;
+}
+
+@keyframes cell-saved {
+  0% {
+    background: var(--accent);
+  }
+  25% {
+    background: var(--accent-soft);
+  }
+  100% {
+    background: transparent;
+  }
+}
+
 .cell {
   font-family: var(--font-mono);
 }

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from 'react';
 import type { DocumentRef, QueryResult } from '../../shared/types';
 import { api, unwrap } from '../lib/api';
 import { cellEditHint, cellEditor, cellValueJson, type CellEditKind } from '../lib/cellEdit';
@@ -7,6 +7,12 @@ import { useStore } from '../state/store';
 import { Button, ContextMenu, EmptyState, Modal, type MenuItem } from './ui';
 
 export type ResultMode = 'table' | 'json';
+
+/** Names one cell, for telling a cancelled edit from the next one. */
+const cellKey = (cell: CellRef) => `${cell.row}:${cell.column}`;
+
+/** One running confirmation for cell saves, rather than a pile of toasts. */
+const SAVE_TOAST = 'cell-save';
 
 /** Everything the table needs to write back to the collection it came from. */
 export interface ResultEditContext {
@@ -90,10 +96,14 @@ export function ResultView({
   const [editing, setEditing] = useState<EditState | null>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [saving, setSaving] = useState(false);
+  const [savedCell, setSavedCell] = useState<CellRef | null>(null);
   const [pendingDelete, setPendingDelete] = useState<{ row: number; idJson: string } | null>(null);
   const gridRef = useRef<HTMLDivElement>(null);
-  // Escape unmounts the input, which also fires blur — this tells them apart.
-  const cancelledRef = useRef(false);
+  const editorRef = useRef<HTMLInputElement | HTMLSelectElement | null>(null);
+  const savedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Escape can unmount the input before its blur arrives, so the cancelled
+  // cell is remembered by name: a stale flag would swallow the next cell's save.
+  const cancelledRef = useRef<string | null>(null);
   // Enter commits and unmounts the input, whose blur would otherwise write twice.
   const writingRef = useRef(false);
   // Distinguishes rows we just wrote ourselves from a freshly run query.
@@ -105,16 +115,50 @@ export function ResultView({
   );
   const columns = result.columns;
 
+  // Whatever is being edited, reachable from teardown paths that have no
+  // access to render state: an unmount, a re-run, a switch to JSON.
+  const pendingRef = useRef<EditState | null>(null);
+  pendingRef.current = editing;
+  const commitRef = useRef<((active: EditState, options?: CommitOptions) => Promise<void>) | null>(
+    null
+  );
+
+  /**
+   * Writes an edit that is about to lose its editor. Focus changes already
+   * commit through blur; this covers everything that removes the input without
+   * one — re-running the query, leaving the table, closing the tab.
+   */
+  const flushPending = useCallback(() => {
+    const active = pendingRef.current;
+    if (!active || active.draft === active.initial) return;
+    pendingRef.current = null;
+    void commitRef.current?.(active, { keepOpen: true });
+  }, []);
+
   // A new set of documents means the rows under the cursor moved.
   useEffect(() => {
     if (selfWriteRef.current) {
       selfWriteRef.current = false;
       return;
     }
+    flushPending();
     setEditing(null);
     setSelected(null);
     setMenu(null);
-  }, [rows]);
+  }, [flushPending, rows]);
+
+  // Leaving the table for the JSON view, or closing the tab altogether.
+  useEffect(() => {
+    if (mode !== 'table') flushPending();
+  }, [flushPending, mode]);
+
+  useEffect(
+    () => () => {
+      flushPending();
+      if (savedTimer.current) clearTimeout(savedTimer.current);
+    },
+    [flushPending]
+  );
 
   const refFor = (idJson: string | null): DocumentRef | null => {
     if (!edit || !idJson) return null;
@@ -135,6 +179,13 @@ export function ResultView({
   };
 
   const hint = (message: string) => store.pushToast({ kind: 'info', message });
+
+  /** Confirms the write where the user is looking, not only in the corner. */
+  const markSaved = (row: number, column: string) => {
+    setSavedCell({ row, column });
+    if (savedTimer.current) clearTimeout(savedTimer.current);
+    savedTimer.current = setTimeout(() => setSavedCell(null), 1400);
+  };
 
   const copy = async (text: string, label: string) => {
     try {
@@ -161,6 +212,7 @@ export function ResultView({
       hint(`“${column}” holds a value that needs the document editor.`);
       return;
     }
+    cancelledRef.current = null;
     setSelected({ row: rowIndex, column });
     setEditing({
       row: rowIndex,
@@ -172,16 +224,30 @@ export function ResultView({
     });
   };
 
+  interface CommitOptions {
+    /** Opens the editor here once the write lands, for Tab. */
+    next?: CellRef;
+    /** Keeps the editor open and focused, for an explicit ⌘S. */
+    keepOpen?: boolean;
+    /**
+     * Returns focus to the grid. Only for keyboard commits: after a blur the
+     * user has already clicked somewhere, and taking that focus back once the
+     * write resolves would be rude.
+     */
+    refocus?: boolean;
+  }
+
   /** Writes the edited cell, then optionally opens the editor on another cell. */
-  const commit = async (active: EditState, next?: CellRef) => {
+  const commit = async (active: EditState, options: CommitOptions = {}) => {
     if (writingRef.current) return;
     const ref = refFor(active.idJson);
     if (!ref) return;
 
     const moveOn = () => {
+      if (options.keepOpen) return;
       setEditing(null);
-      if (next) startEdit(next.row, next.column);
-      else gridRef.current?.focus();
+      if (options.next) startEdit(options.next.row, options.next.column);
+      else if (options.refocus) gridRef.current?.focus();
     };
 
     if (active.draft === active.initial) {
@@ -198,12 +264,23 @@ export function ResultView({
       return;
     }
 
+    // What is about to be stored, remembered before the await: the user may
+    // type on while the write is in flight.
+    const written = active.draft;
     writingRef.current = true;
     setSaving(true);
     try {
       const { value } = await unwrap(api.data.setDocumentField(ref, active.column, valueJson));
       applyPatch(active.row, active.column, value);
-      store.notify(`Updated “${active.column}”`);
+      // The editor now agrees with the collection, so a further keystroke
+      // counts as a new change rather than a re-save of this one.
+      setEditing((current) =>
+        current && current.row === active.row && current.column === active.column
+          ? { ...current, initial: written }
+          : current
+      );
+      markSaved(active.row, active.column);
+      store.notify(`Saved “${active.column}”`, SAVE_TOAST);
       moveOn();
     } catch (error) {
       store.reportError(`Could not update “${active.column}”`, error);
@@ -212,6 +289,8 @@ export function ResultView({
       setSaving(false);
     }
   };
+
+  commitRef.current = commit;
 
   const writeValue = async (rowIndex: number, column: string, valueJson: string) => {
     const ref = refForRow(rowIndex);
@@ -360,6 +439,19 @@ export function ResultView({
   };
 
   const onGridKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') {
+      // Nothing is open, so nothing can be unsaved — say so rather than
+      // leaving the user wondering whether the keystroke did anything.
+      event.preventDefault();
+      if (edit) {
+        store.pushToast({
+          kind: 'info',
+          message: 'Every change is already saved',
+          key: SAVE_TOAST
+        });
+      }
+      return;
+    }
     if (editing || !selected) return;
     const columnIndex = columns.indexOf(selected.column);
     const move = (rowDelta: number, columnDelta: number) => {
@@ -385,14 +477,20 @@ export function ResultView({
   };
 
   const onEditorKeyDown = (active: EditState) => (event: ReactKeyboardEvent<HTMLElement>) => {
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') {
+      // An explicit save leaves the editor where it is, so editing can carry on.
+      event.preventDefault();
+      void commit(active, { keepOpen: true });
+      return;
+    }
     if (event.key === 'Enter') {
       event.preventDefault();
-      void commit(active);
+      void commit(active, { refocus: true });
       return;
     }
     if (event.key === 'Escape') {
       event.preventDefault();
-      cancelledRef.current = true;
+      cancelledRef.current = cellKey(active);
       setEditing(null);
       gridRef.current?.focus();
       return;
@@ -400,15 +498,20 @@ export function ResultView({
     if (event.key === 'Tab') {
       event.preventDefault();
       const nextColumn = columns[columns.indexOf(active.column) + (event.shiftKey ? -1 : 1)];
-      void commit(active, nextColumn ? { row: active.row, column: nextColumn } : undefined);
+      void commit(active, {
+        next: nextColumn ? { row: active.row, column: nextColumn } : undefined,
+        refocus: true
+      });
     }
   };
 
   const onEditorBlur = (active: EditState) => () => {
-    if (cancelledRef.current) {
-      cancelledRef.current = false;
+    if (cancelledRef.current === cellKey(active)) {
+      cancelledRef.current = null;
       return;
     }
+    // Leaving the cell is a save. The focus has already gone somewhere else, so
+    // the write must not pull it back.
     void commit(active);
   };
 
@@ -416,9 +519,11 @@ export function ResultView({
     if (active.kind === 'boolean') {
       return (
         <select
-          className="cell-editor"
+          className={`cell-editor ${saving ? 'is-saving' : ''}`}
           autoFocus
-          disabled={saving}
+          ref={(node) => {
+            editorRef.current = node;
+          }}
           title={cellEditHint(active.kind)}
           value={active.draft}
           onKeyDown={onEditorKeyDown(active)}
@@ -426,7 +531,7 @@ export function ResultView({
           onChange={(event) => {
             const draft = event.target.value;
             setEditing({ ...active, draft });
-            void commit({ ...active, draft });
+            void commit({ ...active, draft }, { refocus: true });
           }}
         >
           <option value="true">true</option>
@@ -436,10 +541,12 @@ export function ResultView({
     }
     return (
       <input
-        className="cell-editor"
+        className={`cell-editor ${saving ? 'is-saving' : active.draft === active.initial ? '' : 'is-dirty'}`}
         autoFocus
         spellCheck={false}
-        disabled={saving}
+        ref={(node) => {
+          editorRef.current = node;
+        }}
         title={cellEditHint(active.kind)}
         value={active.draft}
         onFocus={(event) => event.currentTarget.select()}
@@ -518,10 +625,13 @@ export function ResultView({
                     const expandable = value !== null && typeof value === 'object';
                     const isSelected = selected?.row === index && selected.column === column;
                     const isEditing = editing?.row === index && editing.column === column;
+                    const justSaved = savedCell?.row === index && savedCell.column === column;
                     return (
                       <td
                         key={column}
-                        className={`${isSelected ? 'is-selected' : ''} ${isEditing ? 'is-editing' : ''}`}
+                        className={`${isSelected ? 'is-selected' : ''} ${
+                          isEditing ? 'is-editing' : ''
+                        } ${justSaved ? 'is-saved' : ''}`}
                         title={
                           isEditing
                             ? undefined

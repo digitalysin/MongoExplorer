@@ -151,6 +151,55 @@ async function commitCellEditor(window: BrowserWindow, value: string): Promise<b
   `);
 }
 
+/** Types into an open cell editor without committing it. */
+async function typeInCell(window: BrowserWindow, value: string): Promise<boolean> {
+  return window.webContents.executeJavaScript(`
+    (() => {
+      const input = document.querySelector('input.cell-editor');
+      if (!input) return false;
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      setter.call(input, ${JSON.stringify(value)});
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      return true;
+    })()
+  `);
+}
+
+/** True when the open editor holds a change that has not been written yet. */
+async function cellEditorIsDirty(window: BrowserWindow): Promise<boolean> {
+  return window.webContents.executeJavaScript(
+    `document.querySelector('input.cell-editor')?.classList.contains('is-dirty') ?? false`
+  );
+}
+
+/**
+ * Moves the focus to another cell the way a user does: a click on that cell and
+ * the focus leaving the editor. A window that is not on screen gets no real
+ * focus events out of Chromium, so the focusout React listens for is dispatched
+ * directly — the handler under test is the same one either way.
+ */
+async function focusOtherCell(
+  window: BrowserWindow,
+  row: number,
+  column: string
+): Promise<{ ok: boolean; reason?: string }> {
+  return window.webContents.executeJavaScript(`
+    (() => {
+      const input = document.querySelector('.cell-editor');
+      if (!input) return { ok: false, reason: 'no editor is open' };
+      const headers = [...document.querySelectorAll('.data-table thead th')].map((node) => node.textContent);
+      const index = headers.indexOf(${JSON.stringify(column)});
+      if (index < 0) return { ok: false, reason: 'no ' + ${JSON.stringify(column)} + ' column' };
+      const tr = document.querySelectorAll('.data-table tbody tr')[${row}];
+      if (!tr) return { ok: false, reason: 'no row ${row}' };
+      tr.children[index].dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      input.blur();
+      input.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: tr.children[index] }));
+      return { ok: true };
+    })()
+  `);
+}
+
 /** The column whose cell is currently in edit mode, or '' when none is. */
 async function editingColumn(window: BrowserWindow): Promise<string> {
   return window.webContents.executeJavaScript(`
@@ -163,13 +212,33 @@ async function editingColumn(window: BrowserWindow): Promise<string> {
   `);
 }
 
-async function keyOnEditor(window: BrowserWindow, key: string): Promise<boolean> {
+async function keyOnEditor(
+  window: BrowserWindow,
+  key: string,
+  modifiers: { metaKey?: boolean; ctrlKey?: boolean } = {}
+): Promise<boolean> {
   return window.webContents.executeJavaScript(`
     (() => {
       const input = document.querySelector('.cell-editor');
       if (!input) return false;
-      input.dispatchEvent(new KeyboardEvent('keydown', { key: ${JSON.stringify(key)}, bubbles: true }));
+      input.dispatchEvent(new KeyboardEvent('keydown', {
+        key: ${JSON.stringify(key)},
+        bubbles: true,
+        ...${JSON.stringify(modifiers)}
+      }));
       return true;
+    })()
+  `);
+}
+
+/** The column of the currently selected cell, or '' when none is. */
+async function selectedColumn(window: BrowserWindow): Promise<string> {
+  return window.webContents.executeJavaScript(`
+    (() => {
+      const cell = document.querySelector('.data-table td.is-selected');
+      if (!cell) return '';
+      const headers = [...document.querySelectorAll('.data-table thead th')].map((node) => node.textContent);
+      return headers[[...cell.parentElement.children].indexOf(cell)] ?? '';
     })()
   `);
 }
@@ -426,7 +495,7 @@ async function main(): Promise<void> {
   }
   // A finished operation confirms itself without interrupting anyone.
   const toast = await textOf(window, '.toast.kind-success');
-  if (!toast.includes('Updated “status”')) {
+  if (!toast.includes('Saved “status”')) {
     throw new Error(`the write did not confirm itself in a toast: ${toast || '(no toast)'}`);
   }
 
@@ -448,6 +517,77 @@ async function main(): Promise<void> {
   if (untouched?.amount !== stored?.amount) {
     throw new Error('moving through cells without typing must not write anything');
   }
+
+  console.log('  saving a cell with ⌘S…');
+  if (!(await cellEvent(window, 0, 'currency', 'dblclick')).ok) {
+    throw new Error('could not open the currency cell');
+  }
+  await wait(300);
+  if (!(await typeInCell(window, 'USD'))) throw new Error('the currency editor did not open');
+  await wait(200);
+  if (!(await cellEditorIsDirty(window))) {
+    throw new Error('an unwritten change should be marked as unsaved');
+  }
+  await keyOnEditor(window, 's', { metaKey: true });
+  await wait(1200);
+  if ((await orders.findOne({ reference }))?.currency !== 'USD') {
+    throw new Error('⌘S did not write the cell');
+  }
+  if ((await editingColumn(window)) !== 'currency') {
+    throw new Error('⌘S should save without closing the editor');
+  }
+  if (await cellEditorIsDirty(window)) {
+    throw new Error('a saved editor should no longer look unsaved');
+  }
+  const savedToast = await textOf(window, '.toast.kind-success');
+  if (!savedToast.includes('Saved “currency”')) {
+    throw new Error(`⌘S did not confirm itself: ${savedToast || '(no toast)'}`);
+  }
+  await shoot(window, '09b2-cmd-s-save');
+  await keyOnEditor(window, 'Escape');
+  await wait(300);
+
+  console.log('  saving by moving the focus to another column…');
+  if (!(await cellEvent(window, 0, 'currency', 'dblclick')).ok) {
+    throw new Error('could not reopen the currency cell');
+  }
+  await wait(300);
+  await typeInCell(window, 'SGD');
+  await wait(200);
+  const moved = await focusOtherCell(window, 0, 'customer');
+  if (!moved.ok) throw new Error(`could not move the focus away: ${moved.reason}`);
+  await wait(1200);
+  if ((await orders.findOne({ reference }))?.currency !== 'SGD') {
+    throw new Error('moving to another column did not save the edit');
+  }
+  if ((await editingColumn(window)) !== '') {
+    throw new Error('the editor should close once the focus has gone');
+  }
+  if (!(await textOf(window, '.toast.kind-success')).includes('Saved “currency”')) {
+    throw new Error('saving on a focus change did not confirm itself');
+  }
+  // The write must not drag the focus back from wherever the user clicked.
+  if ((await selectedColumn(window)) !== 'customer') {
+    throw new Error('the cell the user clicked should be the selected one');
+  }
+
+  console.log('  keeping an edit that the query re-run would have dropped…');
+  if (!(await cellEvent(window, 0, 'currency', 'dblclick')).ok) {
+    throw new Error('could not reopen the currency cell');
+  }
+  await wait(300);
+  await typeInCell(window, 'EUR');
+  await wait(200);
+  // Run re-runs the query without the editor ever losing focus, so the write
+  // has to be flushed rather than thrown away with the old rows.
+  await click(window, '.toolbar .btn-primary');
+  await wait(2500);
+  if ((await orders.findOne({ reference }))?.currency !== 'EUR') {
+    throw new Error('re-running the query lost the edit instead of saving it');
+  }
+  await orders.updateOne({ reference }, { $set: { currency: 'IDR' } });
+  await click(window, '.toolbar .btn-primary');
+  await wait(2000);
 
   console.log('  editing numbers without changing their BSON type…');
   const amountOf = async (order: string) => {

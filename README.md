@@ -146,6 +146,16 @@ Tools** (or let it auto-detect them from your `PATH`).
 - Import JSON arrays, NDJSON or CSV (auto-detected from the file), streamed in
   batches so multi-gigabyte files do not have to fit in memory. Insert, merge or
   replace on a chosen match key, optionally dropping the collection first.
+- Import **a whole directory** back — the other half of a batch export. Each
+  file becomes a collection named after it, the format is detected per file so
+  one directory can mix JSON, NDJSON and CSV, and the files found are listed
+  with their sizes to tick or untick before anything runs. Point it at the
+  directory you exported to and it looks one level down for the database folder,
+  where the export put them. With **replace** on `_id` a re-import is a restore
+  rather than a duplication; with **drop each collection first** it is a clean
+  restore. One bar covers the bytes of every chosen file, a file that fails is
+  reported while the rest carry on, and the summary lists what each collection
+  took.
 - Optional external-tool routes: `mongodump`/`mongorestore` for BSON dumps and
   `mongoexport`/`mongoimport` if you prefer them. Their output is streamed into
   the dialog's log panel.
@@ -159,6 +169,8 @@ Tools** (or let it auto-detect them from your `PATH`).
   and the clock until the job ends.
 
 ![Exporting several collections at once](docs/screenshot-export-many.png)
+
+![Importing a directory back](docs/screenshot-import-directory.png)
 
 ![Import in progress](docs/screenshot-import-progress.png)
 

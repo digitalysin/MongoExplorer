@@ -39,7 +39,8 @@ export default function App() {
   const [exportTarget, setExportTarget] = useState<{
     connectionId: string;
     database: string;
-    collection: string;
+    /** Absent when the whole database is the subject. */
+    collection?: string;
   } | null>(null);
   const [importTarget, setImportTarget] = useState<{
     connectionId: string;
@@ -261,14 +262,18 @@ export default function App() {
           </Button>
           <Button
             size="sm"
-            disabled={!selection?.database || !selection.collection}
+            disabled={!selection?.database}
+            title={
+              selection?.collection
+                ? 'Export this collection, a few of them, or the database'
+                : 'Export collections from this database'
+            }
             onClick={() =>
               selection?.database &&
-              selection.collection &&
               setExportTarget({
                 connectionId: selection.connectionId,
                 database: selection.database,
-                collection: selection.collection
+                collection: selection.collection ?? undefined
               })
             }
           >

@@ -505,6 +505,28 @@ body.is-resizing {
   box-shadow: inset 0 0 0 1px var(--accent);
 }
 
+/* The collections a batch export covers; long lists scroll rather than push
+   the dialog past the bottom of the window. */
+.pick-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 4px 12px;
+  max-height: 168px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+}
+
+/* A collection name can be long; wrapping keeps the list from scrolling sideways. */
+.pick-list .checkbox {
+  min-width: 0;
+  align-items: flex-start;
+  overflow-wrap: anywhere;
+}
+
 /* The one cell the keyboard acts on, inside a wider selection. */
 .data-table td.is-focus {
   box-shadow: inset 0 0 0 2px var(--accent);

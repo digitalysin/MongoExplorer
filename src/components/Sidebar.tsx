@@ -10,7 +10,8 @@ interface SidebarProps {
   onEditConnection: (config: ConnectionConfig) => void;
   onDeleteConnection: (config: ConnectionConfig) => void;
   onOpenCollection: (connectionId: string, database: string, collection: string) => void;
-  onExport: (connectionId: string, database: string, collection: string) => void;
+  /** Without a collection the dialog opens on the whole database. */
+  onExport: (connectionId: string, database: string, collection?: string) => void;
   onImport: (connectionId: string, database: string, collection?: string) => void;
   onDropCollection: (connectionId: string, database: string, collection: string) => void;
   onCreateDatabase: (connectionId: string) => void;
@@ -199,6 +200,16 @@ export function Sidebar(props: SidebarProps) {
                                 }}
                               >
                                 ＋
+                              </span>
+                              <span
+                                className="icon-button"
+                                title="Export this database"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  props.onExport(config.id, database.name);
+                                }}
+                              >
+                                ⇥
                               </span>
                               <span
                                 className="icon-button"

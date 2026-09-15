@@ -315,6 +315,54 @@ async function toggleCheckbox(window: BrowserWindow, text: string): Promise<bool
   `);
 }
 
+/** Chooses an option in the select of the `.field` whose label starts with `label`. */
+async function chooseInField(
+  window: BrowserWindow,
+  label: string,
+  value: string
+): Promise<boolean> {
+  return window.webContents.executeJavaScript(`
+    (() => {
+      const field = [...document.querySelectorAll('.modal .field')].find((node) =>
+        node.querySelector('.field-label')?.textContent?.startsWith(${JSON.stringify(label)})
+      );
+      const select = field?.querySelector('select.input');
+      if (!select) return false;
+      const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set;
+      setter.call(select, ${JSON.stringify(value)});
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    })()
+  `);
+}
+
+/** Clicks a checkbox inside the collection picker, by collection name. */
+async function pickCollection(window: BrowserWindow, name: string): Promise<boolean> {
+  return window.webContents.executeJavaScript(`
+    (() => {
+      const box = [...document.querySelectorAll('.pick-list .checkbox')].find(
+        (node) => node.textContent.trim() === ${JSON.stringify(name)}
+      );
+      const input = box?.querySelector('input[type=checkbox]');
+      if (!input) return false;
+      input.click();
+      return true;
+    })()
+  `);
+}
+
+/** The label of the `.field` whose label starts with `label`. */
+async function fieldLabel(window: BrowserWindow, label: string): Promise<string> {
+  return window.webContents.executeJavaScript(`
+    (() => {
+      const node = [...document.querySelectorAll('.modal .field-label')].find((entry) =>
+        entry.textContent?.startsWith(${JSON.stringify(label)})
+      );
+      return node?.textContent ?? '';
+    })()
+  `);
+}
+
 /** Writes an NDJSON file big enough that importing it cannot finish instantly. */
 async function writeBigNdjson(filePath: string, documents: number): Promise<void> {
   const stream = fs.createWriteStream(filePath);
@@ -995,6 +1043,74 @@ async function main(): Promise<void> {
   }
   if (!fs.existsSync(exportPath)) throw new Error('the export wrote no file');
   await shoot(window, '15b-export-done');
+  await click(window, '.modal-footer .btn', 'Close');
+  await wait(300);
+
+  console.log('  exporting a few collections at once…');
+  await click(window, '.titlebar-actions .btn', 'Export');
+  await wait(600);
+  if (!(await chooseInField(window, 'What to export', 'selected'))) {
+    throw new Error('the export dialog offers no way to pick collections');
+  }
+  await wait(1200);
+  const pickable = await count(window, '.pick-list .checkbox');
+  if (pickable < 2) throw new Error(`the picker should list the collections, saw ${pickable}`);
+  if (!(await click(window, '.modal .btn', 'None'))) {
+    throw new Error('the picker has no way to clear the selection');
+  }
+  await wait(200);
+  await pickCollection(window, 'orders');
+  await pickCollection(window, 'customers');
+  await wait(300);
+  if (!(await fieldLabel(window, 'Collections')).includes(`2 of ${pickable} chosen`)) {
+    throw new Error(
+      `the picker should count what is chosen: ${await fieldLabel(window, 'Collections')}`
+    );
+  }
+  const manyDir = path.join(workDir, 'batch-export');
+  await fill(window, '.modal .form-grid .row .input', manyDir);
+  await wait(200);
+  await shoot(window, '15c-export-collections');
+  await click(window, '.modal-footer .btn', 'Export');
+  await wait(4000);
+  const manySummary = await textOf(window, '.modal .badge');
+  if (!/Exported 290 documents from 2 collections/.test(manySummary)) {
+    throw new Error(`the batch export did not report its result: ${manySummary}`);
+  }
+  const manyLog = await textOf(window, '.modal .log-panel');
+  for (const fragment of ['✓ customers', '✓ orders', '250 documents']) {
+    if (!manyLog.includes(fragment)) {
+      throw new Error(`the summary should list each collection, saw: ${manyLog}`);
+    }
+  }
+  for (const name of ['orders', 'customers']) {
+    const file = path.join(manyDir, DATABASE, `${name}.json`);
+    if (!fs.existsSync(file)) throw new Error(`${name} was not written to ${file}`);
+  }
+  if (fs.existsSync(path.join(manyDir, DATABASE, 'price_update_configuration_history_archive.json'))) {
+    throw new Error('a collection nobody chose was exported');
+  }
+  await shoot(window, '15d-export-collections-done');
+
+  console.log('  exporting the whole database…');
+  if (!(await chooseInField(window, 'What to export', 'database'))) {
+    throw new Error('the export dialog offers no whole-database scope');
+  }
+  await wait(600);
+  const wholeDir = path.join(workDir, 'whole-export');
+  await fill(window, '.modal .form-grid .row .input', wholeDir);
+  await wait(200);
+  await click(window, '.modal-footer .btn', 'Export');
+  await wait(5000);
+  const wholeSummary = await textOf(window, '.modal .badge');
+  if (!new RegExp(`from ${pickable} collections`).test(wholeSummary)) {
+    throw new Error(`the whole database should be covered: ${wholeSummary}`);
+  }
+  const written = fs.readdirSync(path.join(wholeDir, DATABASE)).sort();
+  if (written.length !== pickable) {
+    throw new Error(`expected ${pickable} files, found ${written.join(', ')}`);
+  }
+  await shoot(window, '15e-export-database');
   await click(window, '.modal-footer .btn', 'Close');
   await wait(300);
 

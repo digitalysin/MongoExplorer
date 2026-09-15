@@ -50,7 +50,13 @@ import {
   removeSavedQuery,
   saveQuery
 } from '../electron/services/library.js';
-import { cancelJob, exportCollection, importCollection } from '../electron/services/transfer.js';
+import {
+  cancelJob,
+  exportCollection,
+  exportCollections,
+  exportableCollections,
+  importCollection
+} from '../electron/services/transfer.js';
 import { summarizeTransfer } from '../src/lib/transferProgress.js';
 import { detectWrites } from '../shared/writeOps.js';
 import { detectTools, runTool } from '../electron/services/tools.js';
@@ -879,6 +885,141 @@ async function main(): Promise<void> {
     assert.ok(header.includes('address.city'), 'nested fields should become dot-paths');
     assert.equal(rows.length, 3);
     assert.ok(/^[0-9a-f]{24},/.test(rows[0]), 'ObjectId should be written as a plain hex string');
+  });
+
+  await check('several collections export into one directory', async () => {
+    await db.collection('pets').insertMany([{ name: 'Ada' }, { name: 'Bo' }]);
+    await db.collection('plants').insertMany([{ name: 'Fern' }]);
+    const directory = path.join(workDir, 'many');
+    const progress: TransferProgress[] = [];
+    const result = await exportCollections(
+      {
+        connectionId: connection.id,
+        database: DATABASE,
+        collections: ['pets', 'plants'],
+        format: 'ndjson',
+        directory
+      },
+      (update) => progress.push(update)
+    );
+
+    assert.equal(result.ok, true);
+    assert.equal(result.processed, 3, 'the job counts every document it wrote');
+    assert.equal(result.failed, 0);
+    assert.equal(result.filePath, path.join(directory, DATABASE));
+    assert.deepEqual(
+      result.parts?.map((part) => [part.collection, part.processed]),
+      [
+        ['pets', 2],
+        ['plants', 1]
+      ]
+    );
+    const petLines = fs
+      .readFileSync(path.join(directory, DATABASE, 'pets.ndjson'), 'utf8')
+      .trim()
+      .split('\n');
+    assert.equal(petLines.length, 2);
+    assert.equal(
+      fs.readFileSync(path.join(directory, DATABASE, 'plants.ndjson'), 'utf8').trim().split('\n')
+        .length,
+      1
+    );
+
+    // One bar across the job: the total is every collection's documents, and
+    // the running count never restarts at a collection boundary.
+    const running = progress.filter((update) => update.phase === 'running');
+    assert.ok(running.every((update) => update.total === 3), 'the total spans the whole job');
+    const counts = running.map((update) => update.processed);
+    assert.deepEqual(
+      counts,
+      [...counts].sort((left, right) => left - right),
+      'progress must not go backwards between collections'
+    );
+    assert.ok(
+      running.some((update) => update.message?.includes('plants — 2 of 2')),
+      'the bar should name the collection it is on'
+    );
+    const finished = progress.at(-1);
+    assert.equal(finished?.phase, 'done');
+    assert.match(String(finished?.message), /3 documents from 2 of 2 collections/);
+  });
+
+  await check('a whole-database export covers every real collection', async () => {
+    await db.createCollection('a_view', { viewOn: 'people', pipeline: [{ $match: {} }] });
+    const covered = await exportableCollections(connection.id, DATABASE);
+    assert.ok(covered.includes('people'), 'collections are covered');
+    assert.ok(!covered.includes('a_view'), 'a view holds no documents of its own');
+    assert.ok(
+      !covered.some((name) => name.startsWith('system.')),
+      'internal collections are left out'
+    );
+
+    const directory = path.join(workDir, 'whole');
+    const result = await exportCollections(
+      { connectionId: connection.id, database: DATABASE, collections: [], format: 'json-array', directory },
+      silent
+    );
+    assert.equal(result.parts?.length, covered.length, 'every collection gets a file');
+    for (const name of covered) {
+      assert.ok(
+        fs.existsSync(path.join(directory, DATABASE, `${name}.json`)),
+        `${name} was not written`
+      );
+    }
+    await db.collection('a_view').drop();
+  });
+
+  await check('one unreadable collection does not sink the batch', async () => {
+    const directory = path.join(workDir, 'partial');
+    const result = await exportCollections(
+      {
+        connectionId: connection.id,
+        database: DATABASE,
+        // A $-prefixed name cannot be read, so this stands in for anything that
+        // fails halfway through a batch.
+        collections: ['pets', 'not$valid', 'plants'],
+        format: 'ndjson',
+        directory
+      },
+      silent
+    );
+    assert.equal(result.ok, false, 'a failure has to be reported');
+    assert.equal(result.failed, 1);
+    assert.equal(result.processed, 3, 'the collections that worked still exported');
+    assert.match(result.errors[0], /not\$valid/);
+    assert.equal(result.parts?.find((part) => part.collection === 'not$valid')?.processed, 0);
+    assert.ok(result.parts?.find((part) => part.collection === 'not$valid')?.error);
+  });
+
+  await check('a batch export can be filtered and limited per collection', async () => {
+    const directory = path.join(workDir, 'sampled');
+    const result = await exportCollections(
+      {
+        connectionId: connection.id,
+        database: DATABASE,
+        collections: ['pets', 'plants'],
+        format: 'ndjson',
+        directory,
+        limit: 1
+      },
+      silent
+    );
+    assert.equal(result.processed, 2, 'the limit applies to each collection');
+    assert.deepEqual(
+      result.parts?.map((part) => part.processed),
+      [1, 1]
+    );
+  });
+
+  await check('an empty database cannot be exported by mistake', async () => {
+    await assert.rejects(
+      () =>
+        exportCollections(
+          { connectionId: connection.id, database: 'no_such_db_here', collections: [], format: 'ndjson', directory: workDir },
+          silent
+        ),
+      /holds no collections to export/
+    );
   });
 
   await check('import a JSON array into a new collection', async () => {

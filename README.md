@@ -132,6 +132,17 @@ Tools** (or let it auto-detect them from your `PATH`).
   projection, sort, skip and limit. Relaxed or canonical extended JSON; CSV
   columns are derived from a sample or specified by hand, and nested fields
   become dot-paths.
+- Export **several collections or a whole database** in one job: choose the
+  scope in the dialog, tick the collections you want (or take all of them), and
+  each is written to its own file in a folder named after the database. The
+  export icon on a database row in the sidebar opens straight on it. A shared
+  filter and a per-collection limit let you take a sample of every collection,
+  and one progress bar spans the whole job — it counts every collection up
+  front, names the one it is on, and never restarts partway. When a collection
+  fails the rest still run, and the summary lists what each one wrote, with
+  failures marked. Views and internal collections are left out of a
+  whole-database export, since a view holds no documents of its own.
+  `mongodump` can take a whole database too, if you would rather have BSON.
 - Import JSON arrays, NDJSON or CSV (auto-detected from the file), streamed in
   batches so multi-gigabyte files do not have to fit in memory. Insert, merge or
   replace on a chosen match key, optionally dropping the collection first.
@@ -146,6 +157,8 @@ Tools** (or let it auto-detect them from your `PATH`).
 - **Stop** ends a running transfer without closing the app, and says what it
   left behind. Close the dialog and the status bar keeps the bar, the percentage
   and the clock until the job ends.
+
+![Exporting several collections at once](docs/screenshot-export-many.png)
 
 ![Import in progress](docs/screenshot-import-progress.png)
 

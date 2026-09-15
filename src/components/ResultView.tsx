@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent a
 import type { DocumentRef, QueryResult } from '../../shared/types';
 import { api, unwrap } from '../lib/api';
 import { cellEditHint, cellEditor, cellValueJson, type CellEditKind } from '../lib/cellEdit';
-import { formatCellValue, prettyJson, shellLiteral, valueType } from '../lib/format';
+import { formatCellValue, plural, prettyJson, shellLiteral, valueType } from '../lib/format';
 import { useStore } from '../state/store';
 import {
   Button,
@@ -17,8 +17,6 @@ import {
 } from './ui';
 
 export type ResultMode = 'table' | 'json';
-
-const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ? '' : 's'}`;
 
 /** Names one cell, for telling a cancelled edit from the next one. */
 const cellKey = (cell: CellRef) => `${cell.row}:${cell.column}`;

@@ -13,6 +13,11 @@ export function formatNumber(value: number | null | undefined): string {
   return value.toLocaleString();
 }
 
+/** "1 collection" / "3 collections" — a count that reads like English. */
+export function plural(count: number, noun: string): string {
+  return `${formatNumber(count)} ${noun}${count === 1 ? '' : 's'}`;
+}
+
 export function formatDuration(ms: number): string {
   if (ms < 1000) return `${ms} ms`;
   if (ms < 60_000) return `${(ms / 1000).toFixed(2)} s`;

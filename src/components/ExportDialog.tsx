@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { ExportFormat, TransferPart } from '../../shared/types';
 import { api, errorMessage, unwrap } from '../lib/api';
-import { formatDuration, formatNumber } from '../lib/format';
+import { formatDuration, formatNumber, plural } from '../lib/format';
 import { isCancellation } from '../lib/transferProgress';
 import { useStore } from '../state/store';
 import { TransferProgressPanel } from './TransferProgressPanel';
@@ -144,15 +144,23 @@ export function ExportDialog({
         setParts(result.parts ?? null);
         const collections = result.parts?.length ?? 0;
         setDone(
-          `Exported ${formatNumber(result.processed)} documents from ${collections} collections in ${formatDuration(result.durationMs)} to ${result.filePath}`
+          `Exported ${plural(result.processed, 'document')} from ${plural(
+            collections,
+            'collection'
+          )} in ${formatDuration(result.durationMs)} to ${result.filePath}`
         );
         if (result.failed > 0) {
           setError(
-            `${result.failed} of ${collections} collections failed:\n${result.errors.join('\n')}`
+            `${result.failed} of ${plural(collections, 'collection')} failed:\n${result.errors.join(
+              '\n'
+            )}`
           );
         }
         store.notify(
-          `Exported ${formatNumber(result.processed)} documents from ${collections - result.failed} collections`
+          `Exported ${plural(result.processed, 'document')} from ${plural(
+            collections - result.failed,
+            'collection'
+          )}`
         );
       } else if (usesTool) {
         await unwrap(

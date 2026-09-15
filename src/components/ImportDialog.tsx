@@ -1,7 +1,7 @@
-import { useState } from 'react';
-import type { ImportFormat, ImportMode } from '../../shared/types';
+import { useEffect, useState } from 'react';
+import type { ImportCandidate, ImportFormat, ImportMode, TransferPart } from '../../shared/types';
 import { api, errorMessage, unwrap } from '../lib/api';
-import { formatDuration, formatNumber } from '../lib/format';
+import { formatBytes, formatDuration, formatNumber, plural } from '../lib/format';
 import { isCancellation } from '../lib/transferProgress';
 import { useStore } from '../state/store';
 import { TransferProgressPanel } from './TransferProgressPanel';
@@ -9,6 +9,9 @@ import { useToolDetection, useTransferLog } from './transfer';
 import { Badge, Button, Checkbox, Field, Modal, Select, Spinner, TextInput } from './ui';
 
 type ImportKind = ImportFormat | 'mongorestore' | 'mongoimport';
+
+/** One file into one collection, or a directory of them. */
+type ImportScope = 'file' | 'directory';
 
 const FORMAT_OPTIONS: Array<{ value: ImportKind; label: string }> = [
   { value: 'auto', label: 'Detect from file (JSON / NDJSON / CSV)' },
@@ -33,6 +36,10 @@ export function ImportDialog({
   onImported: () => void;
 }) {
   const store = useStore();
+  const [scope, setScope] = useState<ImportScope>('file');
+  const [candidates, setCandidates] = useState<ImportCandidate[] | null>(null);
+  const [picked, setPicked] = useState<string[]>([]);
+  const [parts, setParts] = useState<TransferPart[] | null>(null);
   const [collection, setCollection] = useState(initialCollection ?? '');
   const [kind, setKind] = useState<ImportKind>('auto');
   const [source, setSource] = useState('');
@@ -49,14 +56,49 @@ export function ImportDialog({
   const [done, setDone] = useState<string | null>(null);
 
   const usesTool = kind === 'mongorestore' || kind === 'mongoimport';
+  const many = scope === 'directory' && !usesTool;
   const { tools, loading: detecting, refresh } = useToolDetection(usesTool);
   const log = useTransferLog();
   const detection = tools?.find((tool) => tool.tool === kind);
 
+  // What the chosen directory holds, so the user sees it before it runs.
+  useEffect(() => {
+    if (!many || !source) {
+      setCandidates(null);
+      return;
+    }
+    let current = true;
+    void unwrap(api.transfer.importableFiles(source))
+      .then((found) => {
+        if (!current) return;
+        setCandidates(found);
+        setPicked(found.map((candidate) => candidate.filePath));
+      })
+      .catch((caught) => {
+        if (current) setError(errorMessage(caught));
+      });
+    return () => {
+      current = false;
+    };
+  }, [many, source]);
+
+  // The tools bring their own directory handling, and a format per file is
+  // detected on the way in, so neither choice belongs to a directory import.
+  useEffect(() => {
+    if (scope === 'directory' && !usesTool && kind !== 'auto') setKind('auto');
+  }, [kind, scope, usesTool]);
+
+  const toggleFile = (filePath: string, on: boolean) =>
+    setPicked((current) =>
+      on ? [...current, filePath] : current.filter((entry) => entry !== filePath)
+    );
+
   const pickSource = async () => {
-    if (kind === 'mongorestore') {
+    if (kind === 'mongorestore' || many) {
       const directory = await unwrap(
-        api.dialog.openDirectory({ title: 'Choose the dump directory' })
+        api.dialog.openDirectory({
+          title: many ? 'Choose a directory of files' : 'Choose the dump directory'
+        })
       );
       if (directory) setSource(directory);
       return;
@@ -78,16 +120,65 @@ export function ImportDialog({
       setError('Choose the file or directory to import.');
       return;
     }
-    if (!usesTool && !collection.trim()) {
+    if (!usesTool && !many && !collection.trim()) {
       setError('Enter the target collection name.');
+      return;
+    }
+    if (many && picked.length === 0) {
+      setError('Choose at least one file to import.');
       return;
     }
     setRunning(true);
     setError(null);
     setDone(null);
+    setParts(null);
     log.reset();
     try {
-      if (usesTool) {
+      if (many) {
+        const result = await unwrap(
+          api.transfer.importDirectory({
+            connectionId,
+            database,
+            directory: source,
+            files: picked,
+            mode,
+            upsertFields:
+              mode === 'insert'
+                ? undefined
+                : upsertFields.split(',').map((field) => field.trim()).filter(Boolean),
+            dropBeforeImport: drop,
+            stopOnError,
+            batchSize: Number(batchSize) || 1000,
+            csvDelimiter,
+            csvHasHeader,
+            csvInferTypes
+          })
+        );
+        setParts(result.parts ?? null);
+        const collections = result.parts?.length ?? 0;
+        setDone(
+          `Imported ${plural(result.processed, 'document')} into ${plural(
+            collections,
+            'collection'
+          )} in ${formatDuration(result.durationMs)}`
+        );
+        if (result.ok) {
+          store.notify(
+            `Imported ${plural(result.processed, 'document')} into ${plural(
+              collections,
+              'collection'
+            )}`
+          );
+        } else {
+          store.reportError(
+            `The import finished with problems in ${result.errors.length} of ${plural(
+              collections,
+              'collection'
+            )}`,
+            result.errors.slice(0, 5).join('\n')
+          );
+        }
+      } else if (usesTool) {
         await unwrap(
           api.tools.run({
             connectionId,
@@ -159,7 +250,7 @@ export function ImportDialog({
 
   return (
     <Modal
-      title={`Import into ${database}`}
+      title={many ? `Import a directory into ${database}` : `Import into ${database}`}
       subtitle="JSON, NDJSON and CSV are read natively; BSON dumps need mongorestore."
       onClose={onClose}
       width={700}
@@ -174,31 +265,50 @@ export function ImportDialog({
       }
     >
       <div className="form-grid">
+        <Field
+          label="What to import"
+          hint={many ? 'One collection per file, named after the file.' : 'A single file.'}
+        >
+          <Select value={scope} onChange={(event) => setScope(event.target.value as ImportScope)}>
+            <option value="file">One file</option>
+            <option value="directory">A directory of files</option>
+          </Select>
+        </Field>
         <Field label="Source format">
           <Select value={kind} onChange={(event) => setKind(event.target.value as ImportKind)}>
-            {FORMAT_OPTIONS.map((entry) => (
+            {FORMAT_OPTIONS.filter(
+              (entry) =>
+                scope === 'file' ||
+                entry.value === 'auto' ||
+                entry.value === 'mongorestore' ||
+                entry.value === 'mongoimport'
+            ).map((entry) => (
               <option key={entry.value} value={entry.value}>
                 {entry.label}
               </option>
             ))}
           </Select>
         </Field>
-        <Field label={kind === 'mongorestore' ? 'Dump directory' : 'Source file'}>
+        <Field
+          label={kind === 'mongorestore' ? 'Dump directory' : many ? 'Source directory' : 'Source file'}
+        >
           <div className="row">
             <TextInput value={source} onChange={(event) => setSource(event.target.value)} />
             <Button onClick={() => void pickSource()}>Browse…</Button>
           </div>
         </Field>
-        <Field
-          label="Target collection"
-          hint={
-            kind === 'mongorestore'
-              ? 'Leave empty to restore every collection in the dump.'
-              : 'Created automatically if it does not exist.'
-          }
-        >
-          <TextInput value={collection} onChange={(event) => setCollection(event.target.value)} />
-        </Field>
+        {!many ? (
+          <Field
+            label="Target collection"
+            hint={
+              kind === 'mongorestore'
+                ? 'Leave empty to restore every collection in the dump.'
+                : 'Created automatically if it does not exist.'
+            }
+          >
+            <TextInput value={collection} onChange={(event) => setCollection(event.target.value)} />
+          </Field>
+        ) : null}
         {!usesTool ? (
           <Field label="Batch size">
             <TextInput
@@ -209,6 +319,46 @@ export function ImportDialog({
           </Field>
         ) : null}
       </div>
+
+      {many && source ? (
+        <Field
+          label={`Files — ${picked.length} of ${candidates?.length ?? 0} chosen`}
+          wide
+          hint="Each file lands in a collection named after it. Formats are detected per file."
+        >
+          {candidates === null ? (
+            <Spinner label="Looking in the directory…" />
+          ) : candidates.length === 0 ? (
+            <span className="dim">
+              No JSON, NDJSON or CSV files here. Choose the directory that holds the files.
+            </span>
+          ) : (
+            <>
+              <div className="row" style={{ marginBottom: 6 }}>
+                <Button
+                  size="sm"
+                  onClick={() => setPicked(candidates.map((candidate) => candidate.filePath))}
+                >
+                  All
+                </Button>
+                <Button size="sm" onClick={() => setPicked([])}>
+                  None
+                </Button>
+              </div>
+              <div className="pick-list">
+                {candidates.map((candidate) => (
+                  <Checkbox
+                    key={candidate.filePath}
+                    label={`${candidate.collection} — ${formatBytes(candidate.bytes)}`}
+                    checked={picked.includes(candidate.filePath)}
+                    onChange={(on) => toggleFile(candidate.filePath, on)}
+                  />
+                ))}
+              </div>
+            </>
+          )}
+        </Field>
+      ) : null}
 
       {usesTool ? (
         <div className="row row-wrap" style={{ marginBottom: 14 }}>
@@ -252,7 +402,9 @@ export function ImportDialog({
             ) : null}
           </div>
 
-          {(kind === 'csv' || (kind === 'auto' && source.toLowerCase().endsWith('.csv'))) ? (
+          {kind === 'csv' ||
+          (kind === 'auto' && !many && source.toLowerCase().endsWith('.csv')) ||
+          (many && (candidates ?? []).some((candidate) => candidate.filePath.endsWith('.csv'))) ? (
             <div className="form-grid">
               <Field label="Delimiter">
                 <TextInput
@@ -280,7 +432,7 @@ export function ImportDialog({
 
       <div className="row row-wrap">
         <Checkbox
-          label="Drop the target collection first"
+          label={many ? 'Drop each target collection first' : 'Drop the target collection first'}
           checked={drop}
           onChange={setDrop}
         />
@@ -296,6 +448,20 @@ export function ImportDialog({
       {log.lines.length > 0 ? (
         <div className="log-panel" ref={log.containerRef}>
           {log.lines.join('\n')}
+        </div>
+      ) : null}
+
+      {parts ? (
+        <div className="log-panel" style={{ marginTop: 12 }}>
+          {parts
+            .map((part) =>
+              part.error
+                ? `✗ ${part.collection} — ${part.error}`
+                : `✓ ${part.collection} — ${formatNumber(part.processed)} documents${
+                    part.failed ? `, ${formatNumber(part.failed)} failed` : ''
+                  }`
+            )
+            .join('\n')}
         </div>
       ) : null}
 

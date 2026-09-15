@@ -55,7 +55,9 @@ import {
   exportCollection,
   exportCollections,
   exportableCollections,
-  importCollection
+  importCollection,
+  importDirectory,
+  listImportableFiles
 } from '../electron/services/transfer.js';
 import { summarizeTransfer } from '../src/lib/transferProgress.js';
 import { detectWrites } from '../shared/writeOps.js';
@@ -677,6 +679,172 @@ async function main(): Promise<void> {
     await assert.rejects(
       () => deleteDocuments({ ...target, idsJson: [] }),
       /No documents were selected/
+    );
+  });
+
+  await check('a batch export imports back as a directory', async () => {
+    const directory = path.join(workDir, 'round-trip');
+    await db.collection('rt_pets').insertMany([{ name: 'Ada' }, { name: 'Bo' }]);
+    await db.collection('rt_plants').insertMany([{ name: 'Fern' }]);
+    await exportCollections(
+      {
+        connectionId: connection.id,
+        database: DATABASE,
+        collections: ['rt_pets', 'rt_plants'],
+        format: 'ndjson',
+        directory
+      },
+      silent
+    );
+
+    // The chosen directory is the export's parent, so the files are one level
+    // down — where our own exports put them.
+    const candidates = listImportableFiles(directory);
+    assert.deepEqual(
+      candidates.map((candidate) => candidate.collection),
+      ['rt_pets', 'rt_plants']
+    );
+    assert.ok(candidates.every((candidate) => candidate.bytes > 0));
+
+    const progress: TransferProgress[] = [];
+    const result = await importDirectory(
+      {
+        connectionId: connection.id,
+        database: 'round_trip_db',
+        directory,
+        mode: 'insert'
+      },
+      (update) => progress.push(update)
+    );
+
+    assert.equal(result.ok, true);
+    assert.equal(result.processed, 3);
+    assert.equal(result.failed, 0);
+    assert.deepEqual(
+      result.parts?.map((part) => [part.collection, part.processed]),
+      [
+        ['rt_pets', 2],
+        ['rt_plants', 1]
+      ]
+    );
+    const copy = getDb(connection.id, 'round_trip_db');
+    assert.equal(await copy.collection('rt_pets').countDocuments(), 2);
+    assert.equal(await copy.collection('rt_plants').countDocuments(), 1);
+    // The _ids survived, so the round trip is a copy rather than a reinsertion.
+    const original = await db.collection('rt_pets').find({}).sort({ name: 1 }).toArray();
+    const restored = await copy.collection('rt_pets').find({}).sort({ name: 1 }).toArray();
+    assert.deepEqual(
+      restored.map((document) => String(document._id)),
+      original.map((document) => String(document._id))
+    );
+
+    const running = progress.filter((update) => update.phase === 'running');
+    const bytes = running.map((update) => update.bytes ?? 0);
+    assert.ok(
+      running.every((update) => update.totalBytes === candidates[0].bytes + candidates[1].bytes),
+      'the bar measures every file in the job'
+    );
+    assert.deepEqual(
+      bytes,
+      [...bytes].sort((left, right) => left - right),
+      'progress must not go backwards between files'
+    );
+    assert.match(String(progress.at(-1)?.message), /3 documents into 2 of 2 collections/);
+    await copy.dropDatabase();
+    await db.collection('rt_pets').drop();
+    await db.collection('rt_plants').drop();
+  });
+
+  await check('a directory import can be narrowed, and mixes formats', async () => {
+    const directory = path.join(workDir, 'mixed');
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, 'from_ndjson.ndjson'), '{"n":1}\n{"n":2}\n');
+    fs.writeFileSync(path.join(directory, 'from_array.json'), '[{"n":3}]');
+    fs.writeFileSync(path.join(directory, 'from_csv.csv'), 'n\n4\n5\n');
+    fs.writeFileSync(path.join(directory, 'notes.txt'), 'ignored');
+
+    const candidates = listImportableFiles(directory);
+    assert.deepEqual(
+      candidates.map((candidate) => candidate.collection),
+      ['from_array', 'from_csv', 'from_ndjson'],
+      'only importable files are offered'
+    );
+
+    const narrowed = await importDirectory(
+      {
+        connectionId: connection.id,
+        database: 'mixed_db',
+        directory,
+        files: candidates
+          .filter((candidate) => candidate.collection !== 'from_csv')
+          .map((candidate) => candidate.filePath),
+        mode: 'insert'
+      },
+      silent
+    );
+    assert.equal(narrowed.parts?.length, 2, 'only the chosen files are read');
+    const mixed = getDb(connection.id, 'mixed_db');
+    assert.equal(await mixed.collection('from_ndjson').countDocuments(), 2);
+    assert.equal(await mixed.collection('from_array').countDocuments(), 1);
+    assert.equal(await mixed.listCollections({ name: 'from_csv' }).toArray().then((c) => c.length), 0);
+
+    const all = await importDirectory(
+      { connectionId: connection.id, database: 'mixed_db', directory, mode: 'insert' },
+      silent
+    );
+    assert.equal(all.processed, 5, 'CSV comes in too when it is not excluded');
+    assert.equal(await mixed.collection('from_csv').countDocuments(), 2);
+    assert.equal((await mixed.collection('from_csv').findOne({}))?.n, 4, 'CSV types are inferred');
+    // Without drop, a second run of the same files adds to what is there.
+    assert.equal(await mixed.collection('from_ndjson').countDocuments(), 4);
+
+    const replaced = await importDirectory(
+      {
+        connectionId: connection.id,
+        database: 'mixed_db',
+        directory,
+        mode: 'insert',
+        dropBeforeImport: true
+      },
+      silent
+    );
+    assert.equal(replaced.processed, 5);
+    assert.equal(
+      await mixed.collection('from_ndjson').countDocuments(),
+      2,
+      'dropping first makes a repeat import a restore'
+    );
+    await mixed.dropDatabase();
+  });
+
+  await check('one bad file does not sink a directory import', async () => {
+    const directory = path.join(workDir, 'broken');
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, 'good.ndjson'), '{"n":1}\n');
+    fs.writeFileSync(path.join(directory, 'bad.ndjson'), '{ not json\n');
+
+    const result = await importDirectory(
+      { connectionId: connection.id, database: 'broken_db', directory, mode: 'insert' },
+      silent
+    );
+    assert.equal(result.ok, false);
+    assert.equal(result.processed, 1, 'the good file still landed');
+    assert.equal(result.failed, 1, 'the unreadable record is counted');
+    assert.match(result.errors.join(' '), /bad: Could not parse a record/);
+    assert.equal(result.parts?.find((part) => part.collection === 'bad')?.failed, 1);
+    await getDb(connection.id, 'broken_db').dropDatabase();
+  });
+
+  await check('an empty directory says which one it looked in', async () => {
+    const directory = path.join(workDir, 'nothing-here');
+    fs.mkdirSync(directory, { recursive: true });
+    await assert.rejects(
+      () =>
+        importDirectory(
+          { connectionId: connection.id, database: 'never', directory, mode: 'insert' },
+          silent
+        ),
+      new RegExp(`No JSON, NDJSON or CSV files to import in ${directory.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`)
     );
   });
 

@@ -340,15 +340,35 @@ async function chooseInField(
 async function pickCollection(window: BrowserWindow, name: string): Promise<boolean> {
   return window.webContents.executeJavaScript(`
     (() => {
-      const box = [...document.querySelectorAll('.pick-list .checkbox')].find(
-        (node) => node.textContent.trim() === ${JSON.stringify(name)}
-      );
+      const wanted = ${JSON.stringify(name)};
+      const box = [...document.querySelectorAll('.pick-list .checkbox')].find((node) => {
+        const text = node.textContent.trim();
+        // The import picker appends the file size to the collection name.
+        return text === wanted || text.startsWith(wanted + ' —');
+      });
       const input = box?.querySelector('input[type=checkbox]');
       if (!input) return false;
       input.click();
       return true;
     })()
   `);
+}
+
+/** Waits for a selector's text to match, rather than guessing how long a job takes. */
+async function waitForText(
+  window: BrowserWindow,
+  selector: string,
+  pattern: RegExp,
+  timeoutMs = 20_000
+): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  let text = '';
+  while (Date.now() < deadline) {
+    text = await textOf(window, selector);
+    if (pattern.test(text)) return text;
+    await wait(200);
+  }
+  return text;
 }
 
 /** The label of the `.field` whose label starts with `label`. */
@@ -1052,7 +1072,7 @@ async function main(): Promise<void> {
   if (!(await chooseInField(window, 'What to export', 'selected'))) {
     throw new Error('the export dialog offers no way to pick collections');
   }
-  await wait(1200);
+  await waitForText(window, '.modal .field-label', /Collections — \d+ of [1-9]/, 5000);
   const pickable = await count(window, '.pick-list .checkbox');
   if (pickable < 2) throw new Error(`the picker should list the collections, saw ${pickable}`);
   if (!(await click(window, '.modal .btn', 'None'))) {
@@ -1072,8 +1092,7 @@ async function main(): Promise<void> {
   await wait(200);
   await shoot(window, '15c-export-collections');
   await click(window, '.modal-footer .btn', 'Export');
-  await wait(4000);
-  const manySummary = await textOf(window, '.modal .badge');
+  const manySummary = await waitForText(window, '.modal .badge', /Exported .* documents from/);
   if (!/Exported 290 documents from 2 collections/.test(manySummary)) {
     throw new Error(`the batch export did not report its result: ${manySummary}`);
   }
@@ -1101,8 +1120,11 @@ async function main(): Promise<void> {
   await fill(window, '.modal .form-grid .row .input', wholeDir);
   await wait(200);
   await click(window, '.modal-footer .btn', 'Export');
-  await wait(5000);
-  const wholeSummary = await textOf(window, '.modal .badge');
+  const wholeSummary = await waitForText(
+    window,
+    '.modal .badge',
+    new RegExp(`from ${pickable} collections`)
+  );
   if (!new RegExp(`from ${pickable} collections`).test(wholeSummary)) {
     throw new Error(`the whole database should be covered: ${wholeSummary}`);
   }
@@ -1111,6 +1133,63 @@ async function main(): Promise<void> {
     throw new Error(`expected ${pickable} files, found ${written.join(', ')}`);
   }
   await shoot(window, '15e-export-database');
+  await click(window, '.modal-footer .btn', 'Close');
+  await wait(300);
+
+  console.log('  importing a directory back…');
+  await click(window, '.titlebar-actions .btn', 'Import');
+  await wait(800);
+  if (!(await chooseInField(window, 'What to import', 'directory'))) {
+    throw new Error('the import dialog offers no directory scope');
+  }
+  await wait(300);
+  // The directory the export was pointed at; the files are in the database
+  // folder one level down, which the scan is expected to find.
+  await fill(window, '.modal .form-grid .row .input', wholeDir);
+  await waitForText(window, '.modal .field-label', /Files — \d+ of [1-9]/, 8000);
+  const offered = await count(window, '.pick-list .checkbox');
+  if (offered !== pickable) {
+    throw new Error(`the picker should list the ${pickable} exported files, saw ${offered}`);
+  }
+  const fileList = await textOf(window, '.pick-list');
+  if (!fileList.includes('orders') || !fileList.includes('customers')) {
+    throw new Error(`the files should be named after their collections: ${fileList}`);
+  }
+  if (!(await click(window, '.modal .btn', 'None'))) {
+    throw new Error('the file picker has no way to clear the selection');
+  }
+  await wait(200);
+  await pickCollection(window, 'customers');
+  await wait(300);
+  if (!(await fieldLabel(window, 'Files')).includes(`1 of ${pickable} chosen`)) {
+    throw new Error(`the picker should count the chosen files: ${await fieldLabel(window, 'Files')}`);
+  }
+  // Replacing on _id makes the round trip a restore rather than a duplication.
+  if (!(await chooseInField(window, 'On duplicate', 'replace'))) {
+    throw new Error('the import dialog offers no replace mode');
+  }
+  await wait(200);
+  await shoot(window, '15f-import-directory');
+  await click(window, '.modal-footer .btn', 'Import');
+  const importSummary = await waitForText(window, '.modal .badge', /Imported .* documents into/);
+  if (!/Imported 40 documents into 1 collection\b/.test(importSummary)) {
+    throw new Error(`the directory import did not report its result: ${importSummary}`);
+  }
+  const importLog = await textOf(window, '.modal .log-panel');
+  if (!importLog.includes('✓ customers — 40 documents')) {
+    throw new Error(`the summary should list each file: ${importLog}`);
+  }
+  const restoreClient = new MongoClient(`mongodb://${HOST}`);
+  await restoreClient.connect();
+  try {
+    const restored = await restoreClient.db(DATABASE).collection('customers').countDocuments();
+    if (restored !== 40) {
+      throw new Error(`replacing on _id should leave 40 customers, found ${restored}`);
+    }
+  } finally {
+    await restoreClient.close();
+  }
+  await shoot(window, '15g-import-directory-done');
   await click(window, '.modal-footer .btn', 'Close');
   await wait(300);
 
@@ -1138,7 +1217,7 @@ async function main(): Promise<void> {
     `document.querySelector('.status-right .transfer-status .progress > span').style.width`
   );
   if (barWidth !== '25%') throw new Error(`the bar should be a quarter full, saw ${barWidth}`);
-  await shoot(window, '15c-transfer-progress');
+  await shoot(window, '15h-transfer-progress');
   window.webContents.send(PROGRESS_CHANNEL, {
     jobId: 'ui-check-job',
     kind: 'export',
@@ -1185,7 +1264,7 @@ async function main(): Promise<void> {
       throw new Error(`the panel should settle into an estimate, saw: ${panel}`);
     }
   }
-  await shoot(window, '15d-import-progress');
+  await shoot(window, '15i-import-progress');
 
   console.log('  stopping it…');
   if (!(await click(window, '.transfer-progress .btn', 'Stop'))) {
@@ -1199,7 +1278,7 @@ async function main(): Promise<void> {
   if ((await count(window, '.modal .transfer-progress')) !== 0) {
     throw new Error('the progress panel should disappear once the job is over');
   }
-  await shoot(window, '15e-import-stopped');
+  await shoot(window, '15j-import-stopped');
   await click(window, '.modal-footer .btn', 'Close');
   await wait(300);
 
@@ -1298,4 +1377,4 @@ void app.whenReady().then(() =>
 setTimeout(() => {
   console.error('UI check timed out');
   app.exit(1);
-}, 120_000).unref();
+}, 180_000).unref();

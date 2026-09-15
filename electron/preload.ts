@@ -9,6 +9,7 @@ import type {
   DocumentRef,
   ExportManyRequest,
   ExportRequest,
+  ImportManyRequest,
   ImportRequest,
   QueryRequest,
   RendererApi,
@@ -113,6 +114,8 @@ const api: RendererApi = {
     exportableCollections: (connectionId: string, database: string) =>
       invoke('transfer:exportable', connectionId, database),
     importCollection: (request: ImportRequest) => invoke('transfer:import', request),
+    importDirectory: (request: ImportManyRequest) => invoke('transfer:importMany', request),
+    importableFiles: (directory: string) => invoke('transfer:importable', directory),
     cancel: (jobId: string) => invoke('transfer:cancel', jobId),
     onProgress: (handler: (progress: TransferProgress) => void) => {
       const listener = (_event: unknown, progress: TransferProgress) => handler(progress);

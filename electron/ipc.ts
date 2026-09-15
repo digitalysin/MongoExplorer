@@ -11,6 +11,7 @@ import type {
   DocumentRef,
   ExportManyRequest,
   ExportRequest,
+  ImportManyRequest,
   ImportRequest,
   QueryRequest,
   Result,
@@ -77,7 +78,9 @@ import {
   exportCollection,
   exportCollections,
   exportableCollections,
-  importCollection
+  importCollection,
+  importDirectory,
+  listImportableFiles
 } from './services/transfer.js';
 import { cancelToolJob, detectTools, runTool } from './services/tools.js';
 
@@ -132,6 +135,7 @@ const WRITE_CHANNELS = new Set([
   'data:unsetFieldOnMany',
   'data:deleteDocuments',
   'transfer:import',
+  'transfer:importMany',
   'ops:kill'
 ]);
 
@@ -352,6 +356,10 @@ export function registerIpcHandlers(): void {
     exportableCollections(connectionId, database)
   );
   handle('transfer:import', (request: ImportRequest) => importCollection(request, broadcast));
+  handle('transfer:importMany', (request: ImportManyRequest) =>
+    importDirectory(request, broadcast)
+  );
+  handle('transfer:importable', (directory: string) => listImportableFiles(directory));
   handle('transfer:cancel', (jobId: string) => {
     cancelJob(jobId);
     cancelToolJob(jobId);

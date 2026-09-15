@@ -348,7 +348,8 @@ export interface ImportRequest {
   connectionId: string;
   database: string;
   collection: string;
-  format: ImportFormat;
+  /** Detected from the file extension when absent. */
+  format?: ImportFormat;
   filePath: string;
   mode: ImportMode;
   /** Fields forming the match key for 'upsert'/'replace'. */
@@ -360,6 +361,34 @@ export interface ImportRequest {
   csvDelimiter?: string;
   csvHasHeader?: boolean;
   /** CSV only: try to coerce numbers/booleans/dates instead of keeping strings. */
+  csvInferTypes?: boolean;
+}
+
+/** One file a directory import would read, and where it would land. */
+export interface ImportCandidate {
+  filePath: string;
+  collection: string;
+  bytes: number;
+}
+
+/**
+ * A directory of files, one collection per file — the other half of a batch
+ * export.
+ */
+export interface ImportManyRequest {
+  connectionId: string;
+  database: string;
+  directory: string;
+  /** Absolute paths to import; empty means every importable file found. */
+  files?: string[];
+  mode: ImportMode;
+  upsertFields?: string[];
+  /** Drops each target collection before its file is read. */
+  dropBeforeImport?: boolean;
+  stopOnError?: boolean;
+  batchSize?: number;
+  csvDelimiter?: string;
+  csvHasHeader?: boolean;
   csvInferTypes?: boolean;
 }
 
@@ -384,6 +413,8 @@ export interface TransferProgress {
 export interface TransferPart {
   collection: string;
   processed: number;
+  /** Documents this collection rejected, for an import. */
+  failed?: number;
   filePath: string;
   /** Set when this collection failed and the rest of the batch carried on. */
   error?: string;
@@ -589,6 +620,10 @@ export interface RendererApi {
     /** What a whole-database export would cover. */
     exportableCollections(connectionId: string, database: string): Promise<Result<string[]>>;
     importCollection(request: ImportRequest): Promise<Result<TransferResult>>;
+    /** A directory of files, one collection per file. */
+    importDirectory(request: ImportManyRequest): Promise<Result<TransferResult>>;
+    /** What a directory import would read, for review before it runs. */
+    importableFiles(directory: string): Promise<Result<ImportCandidate[]>>;
     cancel(jobId: string): Promise<Result<null>>;
     onProgress(handler: (progress: TransferProgress) => void): () => void;
   };

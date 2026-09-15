@@ -6,7 +6,9 @@ import type {
   ExportFormat,
   ExportManyRequest,
   ExportRequest,
+  ImportCandidate,
   ImportFormat,
+  ImportManyRequest,
   ImportRequest,
   TransferPart,
   TransferProgress,
@@ -461,8 +463,11 @@ function normalizeCsvCell(value: unknown): unknown {
   return value;
 }
 
-function detectFormat(filePath: string, format: ImportFormat): Exclude<ImportFormat, 'auto'> {
-  if (format !== 'auto') return format;
+function detectFormat(
+  filePath: string,
+  format: ImportFormat | undefined
+): Exclude<ImportFormat, 'auto'> {
+  if (format && format !== 'auto') return format;
   const extension = path.extname(filePath).toLowerCase();
   if (extension === '.csv' || extension === '.tsv') return 'csv';
   if (extension === '.ndjson' || extension === '.jsonl') return 'ndjson';
@@ -535,38 +540,68 @@ class JsonArraySplitter {
   }
 }
 
-export async function importCollection(
+/** Extensions a directory import picks up. */
+const IMPORTABLE_EXTENSIONS = new Set(['.json', '.ndjson', '.jsonl', '.csv']);
+
+/** Where a collection name comes from in a directory import: orders.json → orders. */
+export function collectionNameForFile(filePath: string): string {
+  return path.basename(filePath, path.extname(filePath));
+}
+
+/**
+ * The files a directory import would read, with the collection each would land
+ * in. A batch export writes `<chosen>/<database>/<collection>.json`, so when the
+ * chosen directory holds no importable files its immediate subdirectories are
+ * scanned too — one level only, and the dialog shows what was found before
+ * anything runs.
+ */
+export function listImportableFiles(directory: string): ImportCandidate[] {
+  const scan = (dir: string): ImportCandidate[] =>
+    fs
+      .readdirSync(dir, { withFileTypes: true })
+      .filter(
+        (entry) =>
+          entry.isFile() && IMPORTABLE_EXTENSIONS.has(path.extname(entry.name).toLowerCase())
+      )
+      .map((entry) => {
+        const filePath = path.join(dir, entry.name);
+        return {
+          filePath,
+          collection: collectionNameForFile(entry.name),
+          bytes: fs.statSync(filePath).size
+        };
+      });
+
+  const direct = scan(directory);
+  const found =
+    direct.length > 0
+      ? direct
+      : fs
+          .readdirSync(directory, { withFileTypes: true })
+          .filter((entry) => entry.isDirectory())
+          .flatMap((entry) => scan(path.join(directory, entry.name)));
+  return found.sort((left, right) => left.collection.localeCompare(right.collection));
+}
+
+/**
+ * Reads one file into one collection. Progress is handed to the caller as plain
+ * numbers, so a single import and one file of a directory behave identically.
+ */
+async function importToCollection(
   request: ImportRequest,
-  report: ProgressReporter
-): Promise<TransferResult> {
-  const jobId = randomUUID();
-  const started = Date.now();
-  const startedAt = new Date(started).toISOString();
+  jobId: string,
+  onProgress: (processed: number, bytesRead: number) => void
+): Promise<{ processed: number; failed: number; errors: string[] }> {
   const db = getDb(request.connectionId, request.database);
   const collection = db.collection(request.collection);
   const format = detectFormat(request.filePath, request.format);
   const batchSize = Math.min(Math.max(request.batchSize ?? 1000, 1), 10_000);
   const errors: string[] = [];
 
-  const fileSize = fs.statSync(request.filePath).size;
-  report({
-    jobId,
-    kind: 'import',
-    phase: 'starting',
-    processed: 0,
-    total: null,
-    totalBytes: fileSize,
-    startedAt,
-    filePath: request.filePath,
-    message: `Importing into ${request.database}.${request.collection} (${format})`
-  });
-
   if (request.dropBeforeImport) {
     await collection.drop().catch(() => undefined);
   }
 
-  const tick = makeThrottledReporter(jobId, 'import', report, request.filePath, startedAt);
-  tick({ processed: 0, total: null, bytes: 0, totalBytes: fileSize }, true);
   let processed = 0;
   let failed = 0;
   let batch: Document[] = [];
@@ -652,39 +687,79 @@ export async function importCollection(
       }
       // Documents flushed is not a share of anything until the file is read,
       // so the bytes consumed are what the progress bar tracks.
-      tick({ processed, total: null, bytes: bytesRead, totalBytes: fileSize });
+      onProgress(processed, bytesRead);
     }
 
     if (format === 'ndjson' && ndjsonRemainder.trim()) await handleDocumentText(ndjsonRemainder);
     if (format === 'csv') for (const row of csvParser.flush()) await handleCsvRow(row);
     await flush();
 
+    return { processed, failed, errors };
+  } catch (error) {
+    stream.destroy();
+    throw error;
+  }
+}
+
+export async function importCollection(
+  request: ImportRequest,
+  report: ProgressReporter
+): Promise<TransferResult> {
+  const jobId = randomUUID();
+  const started = Date.now();
+  const startedAt = new Date(started).toISOString();
+  const fileSize = fs.statSync(request.filePath).size;
+  const format = detectFormat(request.filePath, request.format);
+
+  report({
+    jobId,
+    kind: 'import',
+    phase: 'starting',
+    processed: 0,
+    total: null,
+    totalBytes: fileSize,
+    startedAt,
+    filePath: request.filePath,
+    message: `Importing into ${request.database}.${request.collection} (${format})`
+  });
+
+  const tick = makeThrottledReporter(jobId, 'import', report, request.filePath, startedAt);
+  tick({ processed: 0, total: null, bytes: 0, totalBytes: fileSize }, true);
+
+  let processed = 0;
+  let bytesRead = 0;
+  try {
+    const outcome = await importToCollection(request, jobId, (done, bytes) => {
+      processed = done;
+      bytesRead = bytes;
+      tick({ processed, total: null, bytes: bytesRead, totalBytes: fileSize });
+    });
+    processed = outcome.processed;
     report({
       jobId,
       kind: 'import',
       phase: 'done',
-      processed,
-      total: processed + failed,
+      processed: outcome.processed,
+      total: outcome.processed + outcome.failed,
       bytes: fileSize,
       totalBytes: fileSize,
       startedAt,
       filePath: request.filePath,
-      errors,
-      message: `Imported ${processed.toLocaleString()} documents${
-        failed > 0 ? `, ${failed.toLocaleString()} failed` : ''
+      errors: outcome.errors,
+      message: `Imported ${outcome.processed.toLocaleString()} documents${
+        outcome.failed > 0 ? `, ${outcome.failed.toLocaleString()} failed` : ''
       }`
     });
     return {
       jobId,
-      ok: failed === 0,
-      processed,
-      failed,
+      ok: outcome.failed === 0,
+      processed: outcome.processed,
+      failed: outcome.failed,
       filePath: request.filePath,
       durationMs: Date.now() - started,
-      errors
+      errors: outcome.errors
     };
   } catch (error) {
-    stream.destroy();
     const isCancel = error instanceof Error && error.name === 'CancelledError';
     report({
       jobId,
@@ -696,6 +771,156 @@ export async function importCollection(
       totalBytes: fileSize,
       startedAt,
       filePath: request.filePath,
+      message: error instanceof Error ? error.message : String(error)
+    });
+    throw error;
+  } finally {
+    forgetCancellation(jobId);
+  }
+}
+
+/**
+ * Imports a directory of files, one collection per file — the other half of a
+ * batch export. The bar tracks the bytes of every chosen file, so it spans the
+ * job rather than restarting, and each file's format is detected on its own so
+ * a directory can mix JSON, NDJSON and CSV. A file that fails is recorded and
+ * the rest still run, unless "stop on the first error" is set.
+ */
+export async function importDirectory(
+  request: ImportManyRequest,
+  report: ProgressReporter
+): Promise<TransferResult> {
+  const jobId = randomUUID();
+  const started = Date.now();
+  const startedAt = new Date(started).toISOString();
+  const found = listImportableFiles(request.directory);
+  const chosen =
+    request.files && request.files.length > 0
+      ? found.filter((candidate) => request.files?.includes(candidate.filePath))
+      : found;
+
+  if (chosen.length === 0) {
+    throw new Error(
+      `No JSON, NDJSON or CSV files to import in ${request.directory}. Choose the directory that holds the files.`
+    );
+  }
+
+  const totalBytes = chosen.reduce((sum, candidate) => sum + candidate.bytes, 0);
+  report({
+    jobId,
+    kind: 'import',
+    phase: 'starting',
+    processed: 0,
+    total: null,
+    totalBytes,
+    startedAt,
+    filePath: request.directory,
+    message: `Importing ${chosen.length} files into ${request.database}`
+  });
+
+  const tick = makeThrottledReporter(jobId, 'import', report, request.directory, startedAt);
+  tick({ processed: 0, total: null, bytes: 0, totalBytes }, true);
+
+  const parts: TransferPart[] = [];
+  const errors: string[] = [];
+  let processed = 0;
+  let failed = 0;
+  let bytes = 0;
+  try {
+    for (const [index, candidate] of chosen.entries()) {
+      throwIfCancelled(jobId);
+      const message = `${candidate.collection} — ${index + 1} of ${chosen.length}`;
+      const before = { processed, bytes };
+      tick({ processed, total: null, bytes, totalBytes, message }, true);
+      const single: ImportRequest = {
+        connectionId: request.connectionId,
+        database: request.database,
+        collection: candidate.collection,
+        // Detected per file, so one directory can hold several formats.
+        filePath: candidate.filePath,
+        mode: request.mode,
+        upsertFields: request.upsertFields,
+        dropBeforeImport: request.dropBeforeImport,
+        stopOnError: request.stopOnError,
+        batchSize: request.batchSize,
+        csvDelimiter: request.csvDelimiter,
+        csvHasHeader: request.csvHasHeader,
+        csvInferTypes: request.csvInferTypes
+      };
+      try {
+        const outcome = await importToCollection(single, jobId, (donePart, bytesPart) => {
+          tick({
+            processed: before.processed + donePart,
+            total: null,
+            bytes: before.bytes + bytesPart,
+            totalBytes,
+            message
+          });
+        });
+        processed = before.processed + outcome.processed;
+        failed += outcome.failed;
+        // The file has been read to the end, whatever the documents did.
+        bytes = before.bytes + candidate.bytes;
+        errors.push(...outcome.errors.map((entry) => `${candidate.collection}: ${entry}`));
+        parts.push({
+          collection: candidate.collection,
+          processed: outcome.processed,
+          failed: outcome.failed,
+          filePath: candidate.filePath
+        });
+      } catch (error) {
+        if (error instanceof Error && error.name === 'CancelledError') throw error;
+        const detail = error instanceof Error ? error.message : String(error);
+        errors.push(`${candidate.collection}: ${detail}`);
+        parts.push({
+          collection: candidate.collection,
+          processed: 0,
+          filePath: candidate.filePath,
+          error: detail
+        });
+        bytes = before.bytes + candidate.bytes;
+        if (request.stopOnError) throw error;
+      }
+    }
+
+    const brokenFiles = parts.filter((part) => part.error).length;
+    report({
+      jobId,
+      kind: 'import',
+      phase: 'done',
+      processed,
+      total: processed + failed,
+      bytes: totalBytes,
+      totalBytes,
+      startedAt,
+      filePath: request.directory,
+      errors,
+      message: `Imported ${processed.toLocaleString()} documents into ${
+        chosen.length - brokenFiles
+      } of ${chosen.length} collections${failed > 0 ? `, ${failed.toLocaleString()} documents failed` : ''}`
+    });
+    return {
+      jobId,
+      ok: failed === 0 && brokenFiles === 0,
+      processed,
+      failed,
+      filePath: request.directory,
+      durationMs: Date.now() - started,
+      errors,
+      parts
+    };
+  } catch (error) {
+    const isCancel = error instanceof Error && error.name === 'CancelledError';
+    report({
+      jobId,
+      kind: 'import',
+      phase: isCancel ? 'cancelled' : 'error',
+      processed,
+      total: null,
+      bytes,
+      totalBytes,
+      startedAt,
+      filePath: request.directory,
       errors,
       message: error instanceof Error ? error.message : String(error)
     });

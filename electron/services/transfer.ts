@@ -3,9 +3,12 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { AnyBulkWriteOperation, Document, Sort } from 'mongodb';
 import type {
+  ExportFormat,
+  ExportManyRequest,
   ExportRequest,
   ImportFormat,
   ImportRequest,
+  TransferPart,
   TransferProgress,
   TransferResult
 } from '../../shared/types.js';
@@ -79,42 +82,46 @@ async function closeStream(stream: fs.WriteStream): Promise<void> {
   });
 }
 
-export async function exportCollection(
-  request: ExportRequest,
-  report: ProgressReporter
-): Promise<TransferResult> {
-  const jobId = randomUUID();
-  const started = Date.now();
-  const startedAt = new Date(started).toISOString();
-  const delimiter = ',';
-  const db = getDb(request.connectionId, request.database);
-  const collection = db.collection(request.collection);
+/** Extensions the built-in formats write, for naming one file per collection. */
+const EXTENSIONS: Record<ExportFormat, string> = {
+  'json-array': 'json',
+  ndjson: 'ndjson',
+  csv: 'csv'
+};
 
+/** A collection name is not a file name — it may hold anything but `$` and NUL. */
+function safeFileName(name: string): string {
+  return name.replace(/[^A-Za-z0-9._-]+/g, '_') || 'collection';
+}
+
+/**
+ * How many documents the export will write, or null when the collection is too
+ * large to count inside the budget — that leaves the bar open-ended rather than
+ * holding the export up.
+ */
+async function countForExport(request: ExportRequest, filter: Document): Promise<number | null> {
+  const matched = await getDb(request.connectionId, request.database)
+    .collection(request.collection)
+    .countDocuments(filter, { maxTimeMS: 15_000 })
+    .catch(() => null);
+  if (matched === null) return null;
+  // Skip and limit decide how many of the matches actually get written.
+  return Math.max(0, Math.min(matched - (request.skip ?? 0), request.limit ?? matched));
+}
+
+/**
+ * Writes one collection to one file. Progress is handed to the caller as plain
+ * numbers, so a single export and one collection of a batch report the same way.
+ */
+async function exportToFile(
+  request: ExportRequest,
+  jobId: string,
+  onProgress: (processed: number, bytes: number) => void
+): Promise<{ processed: number; bytes: number }> {
+  const collection = getDb(request.connectionId, request.database).collection(request.collection);
   const filter = evaluateExpression<Document>(request.filter, 'filter') ?? {};
   const projection = evaluateExpression<Document>(request.projection, 'projection');
   const sort = evaluateExpression<Document>(request.sort, 'sort');
-
-  report({
-    jobId,
-    kind: 'export',
-    phase: 'starting',
-    processed: 0,
-    total: null,
-    startedAt,
-    filePath: request.filePath,
-    message: `Exporting ${request.database}.${request.collection}`
-  });
-
-  // Counting is what makes the progress bar and the estimate possible; a
-  // collection too large to count in 15s falls back to an open-ended bar.
-  const matched = await collection
-    .countDocuments(filter, { maxTimeMS: 15_000 })
-    .catch(() => null);
-  // Skip and limit decide how many of the matches actually get written.
-  const total =
-    matched === null
-      ? null
-      : Math.max(0, Math.min(matched - (request.skip ?? 0), request.limit ?? matched));
 
   let cursor = collection.find(filter, { projection: projection ?? undefined });
   if (sort) cursor = cursor.sort(sort as Sort);
@@ -123,15 +130,11 @@ export async function exportCollection(
 
   ensureParentDirectory(request.filePath);
   const stream = fs.createWriteStream(request.filePath, { encoding: 'utf8' });
-  const tick = makeThrottledReporter(jobId, 'export', report, request.filePath, startedAt);
   const relaxed = request.jsonMode !== 'canonical';
-  // Publish the total before the first document, so the bar starts out honest.
-  tick({ processed: 0, total, bytes: 0 }, true);
-
   let processed = 0;
   try {
     if (request.format === 'csv') {
-      processed = await writeCsv(cursor, stream, request, delimiter, jobId, total, tick);
+      processed = await writeCsv(cursor, stream, request, ',', jobId, onProgress);
     } else {
       const isArray = request.format === 'json-array';
       if (isArray) await writeChunk(stream, '[\n');
@@ -146,12 +149,51 @@ export async function exportCollection(
           await writeChunk(stream, `${text}\n`);
         }
         processed += 1;
-        tick({ processed, total, bytes: stream.bytesWritten });
+        onProgress(processed, stream.bytesWritten);
       }
       if (isArray) await writeChunk(stream, '\n]\n');
     }
-
     await closeStream(stream);
+    return { processed, bytes: stream.bytesWritten };
+  } catch (error) {
+    stream.destroy();
+    await cursor.close().catch(() => undefined);
+    throw error;
+  }
+}
+
+export async function exportCollection(
+  request: ExportRequest,
+  report: ProgressReporter
+): Promise<TransferResult> {
+  const jobId = randomUUID();
+  const started = Date.now();
+  const startedAt = new Date(started).toISOString();
+
+  report({
+    jobId,
+    kind: 'export',
+    phase: 'starting',
+    processed: 0,
+    total: null,
+    startedAt,
+    filePath: request.filePath,
+    message: `Exporting ${request.database}.${request.collection}`
+  });
+
+  const filter = evaluateExpression<Document>(request.filter, 'filter') ?? {};
+  const total = await countForExport(request, filter);
+  const tick = makeThrottledReporter(jobId, 'export', report, request.filePath, startedAt);
+  // Publish the total before the first document, so the bar starts out honest.
+  tick({ processed: 0, total, bytes: 0 }, true);
+
+  let processed = 0;
+  try {
+    const outcome = await exportToFile(request, jobId, (done, bytes) => {
+      processed = done;
+      tick({ processed, total, bytes });
+    });
+    processed = outcome.processed;
     const result: TransferResult = {
       jobId,
       ok: true,
@@ -174,8 +216,6 @@ export async function exportCollection(
     });
     return result;
   } catch (error) {
-    stream.destroy();
-    await cursor.close().catch(() => undefined);
     const isCancel = error instanceof Error && error.name === 'CancelledError';
     report({
       jobId,
@@ -193,14 +233,162 @@ export async function exportCollection(
   }
 }
 
+/** The collections a whole-database export covers: no views, nothing internal. */
+export async function exportableCollections(
+  connectionId: string,
+  database: string
+): Promise<string[]> {
+  const entries = await getDb(connectionId, database)
+    .listCollections({}, { nameOnly: true })
+    .toArray();
+  return entries
+    .filter((entry) => entry.type !== 'view' && !entry.name.startsWith('system.'))
+    .map((entry) => entry.name)
+    .sort((left, right) => left.localeCompare(right));
+}
+
+/**
+ * Exports several collections, or a whole database, as one job: a directory
+ * named after the database holding one file per collection. The bar counts
+ * every collection up front so it spans the job rather than restarting, and a
+ * collection that fails is recorded and the rest still run — half a database is
+ * more use than none, as long as the failure is reported.
+ */
+export async function exportCollections(
+  request: ExportManyRequest,
+  report: ProgressReporter
+): Promise<TransferResult> {
+  const jobId = randomUUID();
+  const started = Date.now();
+  const startedAt = new Date(started).toISOString();
+  const names =
+    request.collections.length > 0
+      ? request.collections
+      : await exportableCollections(request.connectionId, request.database);
+  const directory = path.join(request.directory, safeFileName(request.database));
+
+  if (names.length === 0) {
+    throw new Error(`${request.database} holds no collections to export.`);
+  }
+
+  report({
+    jobId,
+    kind: 'export',
+    phase: 'starting',
+    processed: 0,
+    total: null,
+    startedAt,
+    filePath: directory,
+    message: `Exporting ${names.length} collections from ${request.database}`
+  });
+
+  const single = (collection: string): ExportRequest => ({
+    connectionId: request.connectionId,
+    database: request.database,
+    collection,
+    format: request.format,
+    filePath: path.join(directory, `${safeFileName(collection)}.${EXTENSIONS[request.format]}`),
+    filter: request.filter,
+    limit: request.limit,
+    jsonMode: request.jsonMode,
+    prettyPrint: request.prettyPrint
+  });
+
+  const filter = evaluateExpression<Document>(request.filter, 'filter') ?? {};
+  const counts = await Promise.all(names.map((name) => countForExport(single(name), filter)));
+  const total = counts.some((count) => count === null)
+    ? null
+    : counts.reduce((sum: number, count) => sum + (count ?? 0), 0);
+
+  const tick = makeThrottledReporter(jobId, 'export', report, directory, startedAt);
+  tick({ processed: 0, total, bytes: 0 }, true);
+
+  const parts: TransferPart[] = [];
+  const errors: string[] = [];
+  let processed = 0;
+  let bytes = 0;
+  try {
+    for (const [index, name] of names.entries()) {
+      throwIfCancelled(jobId);
+      const target = single(name);
+      const message = `${name} — ${index + 1} of ${names.length}`;
+      const before = { processed, bytes };
+      tick({ processed, total, bytes, message }, true);
+      try {
+        const outcome = await exportToFile(target, jobId, (donePart, bytesPart) => {
+          tick({
+            processed: before.processed + donePart,
+            total,
+            bytes: before.bytes + bytesPart,
+            message
+          });
+        });
+        processed = before.processed + outcome.processed;
+        bytes = before.bytes + outcome.bytes;
+        parts.push({ collection: name, processed: outcome.processed, filePath: target.filePath });
+      } catch (error) {
+        if (error instanceof Error && error.name === 'CancelledError') throw error;
+        const detail = error instanceof Error ? error.message : String(error);
+        errors.push(`${name}: ${detail}`);
+        parts.push({
+          collection: name,
+          processed: 0,
+          filePath: target.filePath,
+          error: detail
+        });
+      }
+    }
+
+    report({
+      jobId,
+      kind: 'export',
+      phase: 'done',
+      processed,
+      total: processed,
+      bytes,
+      startedAt,
+      filePath: directory,
+      message: `Exported ${processed.toLocaleString()} documents from ${
+        parts.length - errors.length
+      } of ${names.length} collections`,
+      errors: errors.length > 0 ? errors : undefined
+    });
+    return {
+      jobId,
+      ok: errors.length === 0,
+      processed,
+      failed: errors.length,
+      filePath: directory,
+      durationMs: Date.now() - started,
+      errors,
+      parts
+    };
+  } catch (error) {
+    const isCancel = error instanceof Error && error.name === 'CancelledError';
+    report({
+      jobId,
+      kind: 'export',
+      phase: isCancel ? 'cancelled' : 'error',
+      processed,
+      total,
+      bytes,
+      startedAt,
+      filePath: directory,
+      message: error instanceof Error ? error.message : String(error)
+    });
+    throw error;
+  } finally {
+    forgetCancellation(jobId);
+  }
+}
+
 async function writeCsv(
   cursor: AsyncIterable<Document>,
   stream: fs.WriteStream,
   request: ExportRequest,
   delimiter: string,
   jobId: string,
-  total: number | null,
-  tick: (update: ProgressUpdate) => void
+  onProgress: (processed: number, bytes: number) => void
 ): Promise<number> {
   const buffered: Array<Record<string, unknown>> = [];
   let columns = request.fields?.filter((field) => field.trim().length > 0) ?? [];
@@ -235,13 +423,13 @@ async function writeCsv(
         for (const row of buffered) await writeRow(row);
         processed += buffered.length;
         buffered.length = 0;
-        tick({ processed, total, bytes: stream.bytesWritten });
+        onProgress(processed, stream.bytesWritten);
       }
       continue;
     }
     await writeRow(flat);
     processed += 1;
-    tick({ processed, total, bytes: stream.bytesWritten });
+    onProgress(processed, stream.bytesWritten);
   }
 
   if (!headerWritten) {

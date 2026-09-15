@@ -7,6 +7,7 @@ import type {
   ConnectionSecrets,
   CreateIndexRequest,
   DocumentRef,
+  ExportManyRequest,
   ExportRequest,
   ImportRequest,
   QueryRequest,
@@ -108,6 +109,9 @@ const api: RendererApi = {
   },
   transfer: {
     exportCollection: (request: ExportRequest) => invoke('transfer:export', request),
+    exportCollections: (request: ExportManyRequest) => invoke('transfer:exportMany', request),
+    exportableCollections: (connectionId: string, database: string) =>
+      invoke('transfer:exportable', connectionId, database),
     importCollection: (request: ImportRequest) => invoke('transfer:import', request),
     cancel: (jobId: string) => invoke('transfer:cancel', jobId),
     onProgress: (handler: (progress: TransferProgress) => void) => {

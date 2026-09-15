@@ -322,6 +322,26 @@ export interface ExportRequest {
   prettyPrint?: boolean;
 }
 
+/**
+ * Several collections, or a whole database, in one job. The files land in a
+ * directory named after the database, one per collection.
+ */
+export interface ExportManyRequest {
+  connectionId: string;
+  database: string;
+  /** Empty means every collection in the database. */
+  collections: string[];
+  format: ExportFormat;
+  /** Parent directory; the database gets a folder of its own inside it. */
+  directory: string;
+  /** Applied to every collection, so it only makes sense on shared fields. */
+  filter?: string;
+  /** Per collection, for sampling a database. */
+  limit?: number;
+  jsonMode?: 'relaxed' | 'canonical';
+  prettyPrint?: boolean;
+}
+
 export type ImportMode = 'insert' | 'upsert' | 'replace';
 
 export interface ImportRequest {
@@ -360,6 +380,15 @@ export interface TransferProgress {
   errors?: string[];
 }
 
+/** One collection of a batch export. */
+export interface TransferPart {
+  collection: string;
+  processed: number;
+  filePath: string;
+  /** Set when this collection failed and the rest of the batch carried on. */
+  error?: string;
+}
+
 export interface TransferResult {
   jobId: string;
   ok: boolean;
@@ -368,6 +397,8 @@ export interface TransferResult {
   filePath: string;
   durationMs: number;
   errors: string[];
+  /** One entry per collection, for a batch export. */
+  parts?: TransferPart[];
 }
 
 /** Paths to the official MongoDB Database Tools, resolved lazily and optional. */
@@ -553,6 +584,10 @@ export interface RendererApi {
   };
   transfer: {
     exportCollection(request: ExportRequest): Promise<Result<TransferResult>>;
+    /** Several collections, or a whole database, as one job. */
+    exportCollections(request: ExportManyRequest): Promise<Result<TransferResult>>;
+    /** What a whole-database export would cover. */
+    exportableCollections(connectionId: string, database: string): Promise<Result<string[]>>;
     importCollection(request: ImportRequest): Promise<Result<TransferResult>>;
     cancel(jobId: string): Promise<Result<null>>;
     onProgress(handler: (progress: TransferProgress) => void): () => void;

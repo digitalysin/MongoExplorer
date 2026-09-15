@@ -9,6 +9,7 @@ import type {
   ConnectionSecrets,
   CreateIndexRequest,
   DocumentRef,
+  ExportManyRequest,
   ExportRequest,
   ImportRequest,
   QueryRequest,
@@ -71,7 +72,13 @@ import {
   saveQuery
 } from './services/library.js';
 import { loadSettings, saveSettings } from './services/store.js';
-import { cancelJob, exportCollection, importCollection } from './services/transfer.js';
+import {
+  cancelJob,
+  exportCollection,
+  exportCollections,
+  exportableCollections,
+  importCollection
+} from './services/transfer.js';
 import { cancelToolJob, detectTools, runTool } from './services/tools.js';
 
 /** Replaced by the esbuild bundle; see scripts/build-main.mjs. */
@@ -338,6 +345,12 @@ export function registerIpcHandlers(): void {
   });
 
   handle('transfer:export', (request: ExportRequest) => exportCollection(request, broadcast));
+  handle('transfer:exportMany', (request: ExportManyRequest) =>
+    exportCollections(request, broadcast)
+  );
+  handle('transfer:exportable', (connectionId: string, database: string) =>
+    exportableCollections(connectionId, database)
+  );
   handle('transfer:import', (request: ImportRequest) => importCollection(request, broadcast));
   handle('transfer:cancel', (jobId: string) => {
     cancelJob(jobId);

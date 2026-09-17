@@ -38,8 +38,15 @@ mac:
     - target: zip
       arch: [arm64, x64]
   darkModeSupport: true
-  # Unsigned local builds: without this macOS refuses to open the .app because
-  # the hardened runtime has no signature to validate.
+  # No Apple certificate is ever used. "-" is an ad-hoc signature: it carries no
+  # identity, so the app stays unsigned as far as Gatekeeper is concerned, but it
+  # is a *valid* one. Without it the bundle keeps Electron's own signature over
+  # resources we have since rewritten, and Gatekeeper calls a quarantined copy of
+  # that "damaged" — which right-click Open cannot clear, unlike an ad-hoc build.
+  identity: "-"
+  # The hardened runtime would validate that signature against an identity there
+  # isn't one of, and gatekeeperAssess would run the build through spctl, which
+  # by definition rejects anything unsigned.
   hardenedRuntime: false
   gatekeeperAssess: false
   extendInfo:

@@ -230,9 +230,47 @@ run, so releases cannot loop. For a MINOR or MAJOR release, bump the version
 yourself (`npm version minor --no-git-tag-version`) and push; the next patch bump
 continues from there.
 
-macOS builds are unsigned by default. To sign and notarise, set
-`CSC_LINK`/`CSC_KEY_PASSWORD` and the notarisation credentials before running
-`npm run dist:mac`.
+### Unsigned macOS builds
+
+macOS builds carry no Apple certificate. `electron-builder.yml` sets
+`identity: "-"`, and `dist:mac` runs with `CSC_IDENTITY_AUTO_DISCOVERY=false`, so
+a certificate sitting in your keychain is never picked up — a build on your
+machine is byte-for-byte the same deal as a build in CI.
+
+`"-"` is an *ad-hoc* signature: no identity, no team, nothing Gatekeeper will
+accept — but a structurally valid one. That is the part worth having. Skipping
+signing altogether leaves the bundle carrying Electron's original signature over
+resources electron-builder has since rewritten, which `codesign --verify` fails:
+
+```
+code has no resources but signature indicates they must be present
+```
+
+A quarantined app in that state is not merely refused — Gatekeeper reports it as
+"damaged and can't be opened. You should move it to the Trash", and right-click →
+*Open* will not get past it. With a valid ad-hoc signature the same app gets the
+ordinary unidentified-developer dialog instead, which right-click → *Open* does
+clear.
+
+So the `.app` runs anywhere, but macOS quarantines it the moment it arrives by
+download, AirDrop, Slack or email, and an ad-hoc signature does not clear that
+quarantine. Whoever you hand the build to has to say so once, either way:
+
+- **Finder** — right-click the app, choose *Open*, then *Open* in the dialog.
+  On macOS 15 and newer, open it normally first, then allow it under
+  *System Settings › Privacy & Security*.
+- **Terminal** — strip the quarantine flag outright:
+
+  ```bash
+  xattr -dr com.apple.quarantine "/Applications/Mongo Explorer.app"
+  ```
+
+Either is needed only once per install, not per launch.
+
+To ship something that skips all of this, sign and notarise properly: set
+`CSC_LINK`/`CSC_KEY_PASSWORD` and the notarisation credentials, drop the
+`identity` line from `electron-builder.yml`, and set `hardenedRuntime: true`
+(notarisation requires it) before running `npm run dist:mac`.
 
 ## Verifying
 

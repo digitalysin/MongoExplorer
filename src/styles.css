@@ -640,6 +640,76 @@ select.cell-editor {
   color: var(--text);
 }
 
+.json-search {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.json-search .cm-editor {
+  height: 100%;
+}
+
+.json-search .cm-scroller {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+/* CodeMirror's own search panel is only kept open for its match-highlighting
+   side effect — this component's .find-bar is the actual, visible UI. */
+.json-search .cm-panel.cm-search {
+  display: none;
+}
+
+.find-bar-row {
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elevated);
+}
+
+.find-trigger {
+  background: none;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  padding: 6px 12px;
+  font-size: 12px;
+}
+
+.find-trigger:hover {
+  color: var(--text);
+}
+
+.find-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  flex-wrap: wrap;
+}
+
+.find-bar .input {
+  width: 160px;
+}
+
+.find-count {
+  min-width: 40px;
+  font-size: 11px;
+  color: var(--text-faint);
+  text-align: center;
+}
+
+.find-case {
+  color: var(--text-dim);
+  font-weight: 600;
+}
+
+.find-case.is-active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 /* ---------- stats ---------- */
 
 .stats-page {

@@ -1019,6 +1019,59 @@ async function main(): Promise<void> {
   await wait(500);
   await shoot(window, '10-query-json');
 
+  console.log('  finding and replacing inside the JSON view…');
+  if (!(await click(window, '.find-trigger'))) {
+    throw new Error('the find trigger should open the find bar');
+  }
+  await wait(200);
+  if (!(await fill(window, '.find-bar input[placeholder="Find"]', 'paid'))) {
+    throw new Error('the find bar should have a find field');
+  }
+  await wait(300);
+  if (!(await textOf(window, '.find-count')).includes('/')) {
+    throw new Error('typing a search term should show a match count');
+  }
+  await shoot(window, '10b-json-find');
+  await click(window, '.find-bar button[title="Next match (Enter)"]');
+  await wait(200);
+  await click(window, '.find-case');
+  await wait(200);
+  await shoot(window, '10c-json-find-case');
+  if (!(await fill(window, '.find-bar input[placeholder="Replace"]', 'PAID-TEST'))) {
+    throw new Error('the find bar should have a replace field');
+  }
+  if (!(await click(window, '.find-bar .btn', 'Replace all'))) {
+    throw new Error('the find bar should have a Replace all button');
+  }
+  await wait(300);
+  if (!(await textOf(window, '.cm-content')).includes('PAID-TEST')) {
+    throw new Error('replace all should update the JSON buffer');
+  }
+  await shoot(window, '10d-json-replace-all');
+  await click(window, '.find-bar .icon-button');
+  await wait(200);
+
+  console.log('  back to table, inspecting a nested document…');
+  await click(window, '.segmented button', 'Table');
+  await wait(500);
+  if (!(await cellEvent(window, 0, 'customer', 'dblclick')).ok) {
+    throw new Error('double-clicking an expandable cell should open the document inspector');
+  }
+  await wait(500);
+  await shoot(window, '10e-inspect-modal');
+  if (!(await click(window, '.find-trigger'))) {
+    throw new Error('the inspector modal should also have a find trigger');
+  }
+  await wait(200);
+  await fill(window, '.find-bar input[placeholder="Find"]', 'Jakarta');
+  await wait(300);
+  if (!(await textOf(window, '.find-count')).includes('/')) {
+    throw new Error('the inspector modal find bar should report a match count');
+  }
+  await shoot(window, '10f-inspect-modal-find');
+  await click(window, '.modal-header .icon-button');
+  await wait(300);
+
   console.log('  opening statistics…');
   await click(window, '.titlebar-actions .btn', 'Statistics');
   await wait(2500);

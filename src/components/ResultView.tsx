@@ -4,6 +4,7 @@ import { api, unwrap } from '../lib/api';
 import { cellEditHint, cellEditor, cellValueJson, type CellEditKind } from '../lib/cellEdit';
 import { formatCellValue, plural, prettyJson, shellLiteral, valueType } from '../lib/format';
 import { useStore } from '../state/store';
+import { JsonSearchView } from './JsonSearchView';
 import {
   Button,
   ContextMenu,
@@ -818,7 +819,7 @@ export function ResultView({
   }
 
   if (mode === 'json') {
-    return <pre className="json-view">{prettyJson(rows)}</pre>;
+    return <JsonSearchView value={prettyJson(rows)} />;
   }
 
   return (
@@ -937,9 +938,7 @@ export function ResultView({
 
       {inspected !== null ? (
         <Modal title="Document" onClose={() => setInspected(null)} width={760}>
-          <pre className="json-view" style={{ padding: 0 }}>
-            {prettyJson(inspected)}
-          </pre>
+          <JsonSearchView value={prettyJson(inspected)} minHeight="120px" />
         </Modal>
       ) : null}
 

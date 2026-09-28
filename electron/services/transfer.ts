@@ -92,7 +92,7 @@ const EXTENSIONS: Record<ExportFormat, string> = {
 };
 
 /** A collection name is not a file name — it may hold anything but `$` and NUL. */
-function safeFileName(name: string): string {
+export function safeFileName(name: string): string {
   return name.replace(/[^A-Za-z0-9._-]+/g, '_') || 'collection';
 }
 

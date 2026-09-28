@@ -14,6 +14,7 @@ import type {
   QueryRequest,
   RendererApi,
   SavedQuery,
+  ToolBatchRequest,
   ToolRunRequest,
   TransferProgress
 } from '../shared/types.js';
@@ -125,7 +126,8 @@ const api: RendererApi = {
   },
   tools: {
     detect: () => invoke('tools:detect'),
-    run: (request: ToolRunRequest) => invoke('tools:run', request)
+    run: (request: ToolRunRequest) => invoke('tools:run', request),
+    runMany: (request: ToolBatchRequest) => invoke('tools:runMany', request)
   },
   settings: {
     get: () => invoke('settings:get'),

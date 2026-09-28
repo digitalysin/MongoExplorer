@@ -472,6 +472,29 @@ export interface ToolRunRequest {
   query?: string;
 }
 
+/**
+ * mongodump or mongoexport across several collections, or a whole database, as
+ * one job. Both tools take one collection per run when filtering, and mongodump
+ * cannot take a hand-picked set at all, so each collection gets a run of its own.
+ */
+export interface ToolBatchRequest {
+  connectionId: string;
+  tool: 'mongodump' | 'mongoexport';
+  database: string;
+  /** Empty means every collection in the database. */
+  collections: string[];
+  /**
+   * Parent directory. Either way the database gets a folder inside it:
+   * mongoexport writes `<collection>.json` there, and mongodump the layout
+   * mongorestore reads.
+   */
+  directory: string;
+  /** Strict JSON, passed to every run as --query. */
+  query?: string;
+  /** mongodump only. */
+  gzip?: boolean;
+}
+
 export interface ToolDetection {
   tool: MongoToolName;
   path: string | null;
@@ -630,6 +653,8 @@ export interface RendererApi {
   tools: {
     detect(): Promise<Result<ToolDetection[]>>;
     run(request: ToolRunRequest): Promise<Result<TransferResult>>;
+    /** One tool over several collections, or a whole database, as one job. */
+    runMany(request: ToolBatchRequest): Promise<Result<TransferResult>>;
   };
   settings: {
     get(): Promise<Result<AppSettings>>;

@@ -3,15 +3,21 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import type { Document } from 'mongodb';
 import type {
   MongoToolName,
+  ToolBatchRequest,
   ToolDetection,
   ToolRunRequest,
+  TransferPart,
   TransferProgress,
   TransferResult
 } from '../../shared/types.js';
+import { EJSON } from './bsonEval.js';
 import { buildConnectionUri, getConnection, resolveSecrets } from './connections.js';
+import { getDb } from './pool.js';
 import { loadSettings } from './store.js';
+import { exportableCollections, safeFileName } from './transfer.js';
 
 const TOOL_NAMES: MongoToolName[] = [
   'mongodump',
@@ -211,17 +217,69 @@ function buildToolArgs(request: ToolRunRequest, uri: string): string[] {
   return args;
 }
 
+/** The child a job is running right now, if any — a batch runs several in turn. */
 const runningJobs = new Map<string, ReturnType<typeof spawn>>();
-const killedJobs = new Set<string>();
+/** Jobs still under way, including a batch caught between two of its runs. */
+const activeJobs = new Set<string>();
+const stoppedJobs = new Set<string>();
 
 export function cancelToolJob(jobId: string): boolean {
-  const child = runningJobs.get(jobId);
-  if (!child) return false;
-  // Remembered so the non-zero exit reads as "the user stopped it", not a failure.
-  killedJobs.add(jobId);
-  child.kill();
-  runningJobs.delete(jobId);
+  if (!activeJobs.has(jobId)) return false;
+  // Remembered so the non-zero exit reads as "the user stopped it", not a
+  // failure, and so a batch between runs does not start the next one.
+  stoppedJobs.add(jobId);
+  runningJobs.get(jobId)?.kill();
   return true;
+}
+
+function cancelledError(): Error {
+  const error = new Error('Cancelled by user.');
+  error.name = 'CancelledError';
+  return error;
+}
+
+interface ToolExit {
+  code: number | null;
+  stopped: boolean;
+  output: string[];
+}
+
+/**
+ * One run of one tool, registered under `jobId` so Stop can reach it. Every
+ * non-empty line of output is handed to `onLine` as it arrives.
+ */
+function spawnTool(
+  executable: string,
+  args: string[],
+  jobId: string,
+  onLine: (line: string) => void
+): Promise<ToolExit> {
+  return new Promise((resolve, reject) => {
+    const output: string[] = [];
+    const child = spawn(executable, args, { windowsHide: true });
+    runningJobs.set(jobId, child);
+
+    const read = (raw: string) => {
+      for (const line of raw.split(/\r?\n/)) {
+        const message = line.trim();
+        if (!message) continue;
+        output.push(message);
+        onLine(message);
+      }
+    };
+    // The database tools report progress on stderr, not stdout.
+    child.stdout?.on('data', (chunk) => read(String(chunk)));
+    child.stderr?.on('data', (chunk) => read(String(chunk)));
+
+    child.on('error', (error) => {
+      runningJobs.delete(jobId);
+      reject(error);
+    });
+    child.on('close', (code) => {
+      runningJobs.delete(jobId);
+      resolve({ code, stopped: stoppedJobs.has(jobId), output });
+    });
+  });
 }
 
 interface ToolCounts {
@@ -260,6 +318,15 @@ function parseToolCounts(line: string): ToolCounts {
   return {};
 }
 
+/**
+ * The exact count a run ends on: `exported 3 records` from mongoexport, or
+ * ``done dumping `shop.orders` (3 documents)`` from mongodump.
+ */
+function parseFinalCount(line: string): number | null {
+  const match = line.match(/exported (\d+) records?/) ?? line.match(/done dumping .*\((\d+) documents?\)/);
+  return match ? Number(match[1]) : null;
+}
+
 export async function runTool(
   request: ToolRunRequest,
   report: (progress: TransferProgress) => void
@@ -272,7 +339,6 @@ export async function runTool(
   const jobId = randomUUID();
   const started = Date.now();
   const startedAt = new Date(started).toISOString();
-  const output: string[] = [];
   // The tools only tell us how far along they are through their log lines.
   let counted: ToolCounts = {};
 
@@ -287,15 +353,11 @@ export async function runTool(
     message: `${path.basename(executable)} ${maskUri(args)}`
   });
 
-  return new Promise<TransferResult>((resolve, reject) => {
-    const child = spawn(executable, args, { windowsHide: true });
-    runningJobs.set(jobId, child);
-
-    const onLine = (raw: string) => {
-      for (const line of raw.split(/\r?\n/)) {
-        const message = line.trim();
-        if (!message) continue;
-        output.push(message);
+  activeJobs.add(jobId);
+  try {
+    let exit: ToolExit;
+    try {
+      exit = await spawnTool(executable, args, jobId, (message) => {
         counted = { ...counted, ...parseToolCounts(message) };
         report({
           jobId,
@@ -309,15 +371,8 @@ export async function runTool(
           filePath: request.target,
           message
         });
-      }
-    };
-
-    // The database tools report progress on stderr, not stdout.
-    child.stdout?.on('data', (chunk) => onLine(String(chunk)));
-    child.stderr?.on('data', (chunk) => onLine(String(chunk)));
-
-    child.on('error', (error) => {
-      runningJobs.delete(jobId);
+      });
+    } catch (error) {
       report({
         jobId,
         kind: 'tool',
@@ -326,49 +381,258 @@ export async function runTool(
         total: counted.total ?? null,
         startedAt,
         filePath: request.target,
-        message: error.message
+        message: error instanceof Error ? error.message : String(error)
       });
-      reject(error);
+      throw error;
+    }
+
+    const { code, stopped, output } = exit;
+    const ok = code === 0 && !stopped;
+    report({
+      jobId,
+      kind: 'tool',
+      phase: stopped ? 'cancelled' : ok ? 'done' : 'error',
+      processed: counted.processed ?? 0,
+      total: counted.total ?? null,
+      startedAt,
+      filePath: request.target,
+      errors: ok || stopped ? [] : output.slice(-20),
+      message: stopped
+        ? `${request.tool} stopped: cancelled by user.`
+        : ok
+          ? `${request.tool} finished successfully`
+          : `${request.tool} exited with code ${code}`
+    });
+    if (stopped) throw cancelledError();
+    if (!ok) {
+      throw new Error(`${request.tool} exited with code ${code}:\n${output.slice(-10).join('\n')}`);
+    }
+    return {
+      jobId,
+      ok: true,
+      processed: 0,
+      failed: 0,
+      filePath: request.target,
+      durationMs: Date.now() - started,
+      errors: []
+    };
+  } finally {
+    activeJobs.delete(jobId);
+    stoppedJobs.delete(jobId);
+  }
+}
+
+/** How many documents a run over this collection should cover, or null if unknown. */
+async function countForTool(
+  connectionId: string,
+  database: string,
+  collection: string,
+  filter: Document | null
+): Promise<number | null> {
+  const target = getDb(connectionId, database).collection(collection);
+  const counting = filter
+    ? target.countDocuments(filter, { maxTimeMS: 15_000 })
+    : target.estimatedDocumentCount({ maxTimeMS: 15_000 });
+  return counting.catch(() => null);
+}
+
+/**
+ * The line that best says why a run failed: the tool's own `Failed:` line when
+ * it printed one, otherwise its last words.
+ */
+function failureReason(output: string[], code: number | null): string {
+  const failed = [...output].reverse().find((line) => /Failed:/.test(line));
+  const line = failed ?? output[output.length - 1];
+  // Drop the timestamp the tools put in front of every line.
+  const reason = line?.replace(/^\S+\s+/, '').replace(/^Failed:\s*/, '');
+  return reason || `exited with code ${code}`;
+}
+
+/**
+ * Runs mongodump or mongoexport once per collection, under one job id, so the
+ * dialog sees a single job: one bar across every collection, one Stop that ends
+ * the run in progress and starts no more, and a part per collection in the
+ * result. A collection that fails is recorded and the rest still run.
+ *
+ * A whole database dumped without a filter stays a single mongodump run: that
+ * one also carries the views and the database-level metadata, which dumping
+ * collection by collection would leave behind.
+ */
+export async function runToolBatch(
+  request: ToolBatchRequest,
+  report: (progress: TransferProgress) => void
+): Promise<TransferResult> {
+  if (request.tool === 'mongodump' && request.collections.length === 0 && !request.query) {
+    return runTool(
+      {
+        connectionId: request.connectionId,
+        tool: 'mongodump',
+        database: request.database,
+        target: request.directory,
+        gzip: request.gzip
+      },
+      report
+    );
+  }
+
+  // Checked once here rather than failing every collection with the same error.
+  let filter: Document | null = null;
+  if (request.query) {
+    try {
+      filter = EJSON.parse(request.query, { relaxed: false }) as Document;
+    } catch (error) {
+      throw new Error(
+        `The filter is passed to ${request.tool} as --query, so it must be strict JSON: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+
+  const executable = await resolveToolPath(request.tool);
+  const names =
+    request.collections.length > 0
+      ? request.collections
+      : await exportableCollections(request.connectionId, request.database);
+  if (names.length === 0) {
+    throw new Error(`${request.database} holds no collections to export.`);
+  }
+
+  const config = getConnection(request.connectionId);
+  const secrets = resolveSecrets(request.connectionId);
+  const uri = buildConnectionUri(config, secrets, { embedPassword: true });
+  const jobId = randomUUID();
+  const started = Date.now();
+  const startedAt = new Date(started).toISOString();
+  // mongodump puts the database folder under --out itself; mongoexport is
+  // given file paths, laid out the way the built-in batch export lays them.
+  const directory =
+    request.tool === 'mongodump'
+      ? path.join(request.directory, request.database)
+      : path.join(request.directory, safeFileName(request.database));
+  const fileFor = (collection: string): string =>
+    request.tool === 'mongodump'
+      ? path.join(directory, `${collection}.bson${request.gzip ? '.gz' : ''}`)
+      : path.join(directory, `${safeFileName(collection)}.json`);
+
+  const counts = await Promise.all(
+    names.map((name) => countForTool(request.connectionId, request.database, name, filter))
+  );
+  const total = counts.some((count) => count === null)
+    ? null
+    : counts.reduce((sum: number, count) => sum + (count ?? 0), 0);
+
+  const parts: TransferPart[] = [];
+  const errors: string[] = [];
+  let processed = 0;
+  const progress = (
+    phase: TransferProgress['phase'],
+    done: number,
+    message: string,
+    extra: Partial<TransferProgress> = {}
+  ) =>
+    report({
+      jobId,
+      kind: 'tool',
+      phase,
+      processed: done,
+      total,
+      startedAt,
+      filePath: directory,
+      message,
+      ...extra
     });
 
-    child.on('close', (code) => {
-      runningJobs.delete(jobId);
-      const stopped = killedJobs.delete(jobId);
-      const ok = code === 0 && !stopped;
-      report({
-        jobId,
-        kind: 'tool',
-        phase: stopped ? 'cancelled' : ok ? 'done' : 'error',
-        processed: counted.processed ?? 0,
-        total: counted.total ?? null,
-        startedAt,
-        filePath: request.target,
-        errors: ok || stopped ? [] : output.slice(-20),
-        message: stopped
-          ? `${request.tool} stopped: cancelled by user.`
-          : ok
-            ? `${request.tool} finished successfully`
-            : `${request.tool} exited with code ${code}`
+  progress(
+    'starting',
+    0,
+    `${request.tool}: ${names.length} collections from ${request.database}, one run each`
+  );
+
+  activeJobs.add(jobId);
+  try {
+    if (request.tool === 'mongoexport') fs.mkdirSync(directory, { recursive: true });
+    for (const [index, name] of names.entries()) {
+      if (stoppedJobs.has(jobId)) throw cancelledError();
+      const target = fileFor(name);
+      const args = buildToolArgs(
+        {
+          connectionId: request.connectionId,
+          tool: request.tool,
+          database: request.database,
+          collection: name,
+          target: request.tool === 'mongodump' ? request.directory : target,
+          format: request.tool === 'mongoexport' ? 'json' : undefined,
+          gzip: request.gzip,
+          query: request.query
+        },
+        uri
+      );
+      const before = processed;
+      let current = 0;
+      let final: number | null = null;
+      let missing = false;
+      const label = `${name} — ${index + 1} of ${names.length}`;
+      progress('running', before, `${label}: ${path.basename(executable)} ${maskUri(args)}`);
+
+      const exit = await spawnTool(executable, args, jobId, (message) => {
+        const seen = parseToolCounts(message).processed;
+        if (seen !== undefined) current = seen;
+        final = parseFinalCount(message) ?? final;
+        // mongodump exits 0 on a collection that is gone, and only says so.
+        if (/does not exist/.test(message)) missing = true;
+        progress('running', before + current, message);
       });
-      if (stopped) {
-        const error = new Error('Cancelled by user.');
-        error.name = 'CancelledError';
-        reject(error);
-        return;
+      if (exit.stopped) throw cancelledError();
+
+      const failure =
+        exit.code !== 0
+          ? failureReason(exit.output, exit.code)
+          : missing
+            ? 'the collection does not exist'
+            : null;
+      if (failure) {
+        errors.push(`${name}: ${failure}`);
+        parts.push({ collection: name, processed: 0, filePath: target, error: failure });
+        continue;
       }
-      if (!ok) {
-        reject(new Error(`${request.tool} exited with code ${code}:\n${output.slice(-10).join('\n')}`));
-        return;
-      }
-      resolve({
-        jobId,
-        ok: true,
-        processed: 0,
-        failed: 0,
-        filePath: request.target,
-        durationMs: Date.now() - started,
-        errors: []
-      });
-    });
-  });
+      const written = final ?? current;
+      processed = before + written;
+      parts.push({ collection: name, processed: written, filePath: target });
+    }
+
+    progress(
+      'done',
+      processed,
+      `${request.tool} wrote ${processed.toLocaleString()} documents from ${
+        parts.length - errors.length
+      } of ${names.length} collections`,
+      { total: processed, errors: errors.length > 0 ? errors : undefined }
+    );
+    return {
+      jobId,
+      ok: errors.length === 0,
+      processed,
+      failed: errors.length,
+      filePath: directory,
+      durationMs: Date.now() - started,
+      errors,
+      parts
+    };
+  } catch (error) {
+    const isCancel = error instanceof Error && error.name === 'CancelledError';
+    progress(
+      isCancel ? 'cancelled' : 'error',
+      processed,
+      isCancel
+        ? `${request.tool} stopped: cancelled by user.`
+        : error instanceof Error
+          ? error.message
+          : String(error)
+    );
+    throw error;
+  } finally {
+    activeJobs.delete(jobId);
+    stoppedJobs.delete(jobId);
+  }
 }

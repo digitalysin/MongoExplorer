@@ -16,6 +16,7 @@ import type {
   QueryRequest,
   Result,
   SavedQuery,
+  ToolBatchRequest,
   ToolRunRequest,
   TransferProgress
 } from '../shared/types.js';
@@ -82,7 +83,7 @@ import {
   importDirectory,
   listImportableFiles
 } from './services/transfer.js';
-import { cancelToolJob, detectTools, runTool } from './services/tools.js';
+import { cancelToolJob, detectTools, runTool, runToolBatch } from './services/tools.js';
 
 /** Replaced by the esbuild bundle; see scripts/build-main.mjs. */
 declare const __APP_VERSION__: string | undefined;
@@ -374,6 +375,8 @@ export function registerIpcHandlers(): void {
     }
     return runTool(request, broadcast);
   });
+  // Only mongodump and mongoexport take a batch, and both only read.
+  handle('tools:runMany', (request: ToolBatchRequest) => runToolBatch(request, broadcast));
 
   handle('data:setFieldOnMany', (request: BulkFieldRequest) => setFieldOnMany(request));
   handle('data:unsetFieldOnMany', (request: BulkDocumentsRequest & { field: string }) =>

@@ -142,7 +142,17 @@ Tools** (or let it auto-detect them from your `PATH`).
   fails the rest still run, and the summary lists what each one wrote, with
   failures marked. Views and internal collections are left out of a
   whole-database export, since a view holds no documents of its own.
-  `mongodump` can take a whole database too, if you would rather have BSON.
+- The same picker drives **`mongodump` and `mongoexport`**, for the chosen
+  collections or the whole database. Neither tool takes a hand-picked set in one
+  run, so each collection gets a run of its own, all under one job: one bar
+  across every collection, one **Stop** that ends the run in progress and starts
+  no more, and a line per collection in the summary. A collection that fails is
+  marked and the rest still run. `mongoexport` writes
+  `<database>/<collection>.json`, which the directory import below reads back;
+  `mongodump` writes the layout `mongorestore` expects. An unfiltered
+  whole-database dump stays a single `mongodump` run, since that one also keeps
+  the views and database metadata — a filter splits it per collection, because
+  `mongodump` only filters one collection at a time.
 - Import JSON arrays, NDJSON or CSV (auto-detected from the file), streamed in
   batches so multi-gigabyte files do not have to fit in memory. Insert, merge or
   replace on a chosen match key, optionally dropping the collection first.

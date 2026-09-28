@@ -69,12 +69,12 @@ export function ExportDialog({
       .catch((caught) => setError(errorMessage(caught)));
   }, [available, connectionId, database, many]);
 
-  // mongoexport takes one collection at a time, and mongodump takes a whole
-  // database but not a hand-picked set of collections.
-  useEffect(() => {
-    if (scope === 'selected' && usesTool) setKind('json-array');
-    if (scope === 'database' && kind === 'mongoexport') setKind('json-array');
-  }, [kind, scope, usesTool]);
+  // Neither tool covers several collections in one run, so a batch runs them one
+  // collection at a time — except a whole, unfiltered database, which mongodump
+  // takes in one go and keeps its views and metadata by doing so.
+  const wholeDump = kind === 'mongodump' && scope === 'database' && !filter.trim();
+  const covered = scope === 'database' ? (available?.length ?? 0) : picked.length;
+  const allPicked = available !== null && available.length > 0 && picked.length === available.length;
 
   const toggleCollection = (name: string, on: boolean) =>
     setPicked((current) =>
@@ -162,14 +162,49 @@ export function ExportDialog({
             'collection'
           )}`
         );
+      } else if (usesTool && many) {
+        const result = await unwrap(
+          api.tools.runMany({
+            connectionId,
+            tool: kind === 'mongodump' ? 'mongodump' : 'mongoexport',
+            database,
+            collections: scope === 'database' ? [] : picked,
+            directory: target,
+            query: filter || undefined,
+            gzip: kind === 'mongodump' ? gzip : undefined
+          })
+        );
+        // A whole-database dump is a single run and reports no parts.
+        if (result.parts) {
+          setParts(result.parts);
+          const collections = result.parts.length;
+          setDone(
+            `${kind} wrote ${plural(result.processed, 'document')} from ${plural(
+              collections - result.failed,
+              'collection'
+            )} in ${formatDuration(result.durationMs)} to ${result.filePath}`
+          );
+          if (result.failed > 0) {
+            setError(
+              `${result.failed} of ${plural(collections, 'collection')} failed:\n${result.errors.join(
+                '\n'
+              )}`
+            );
+          }
+          store.notify(
+            `${kind} finished ${plural(collections - result.failed, 'collection')}`
+          );
+        } else {
+          setDone(`${kind} finished. Output written to ${target}`);
+          store.notify(`${kind} finished`);
+        }
       } else if (usesTool) {
         await unwrap(
           api.tools.run({
             connectionId,
             tool: kind === 'mongodump' ? 'mongodump' : 'mongoexport',
             database,
-            // mongodump without a collection dumps the whole database.
-            collection: many ? undefined : collection,
+            collection,
             target,
             gzip,
             format: kind === 'mongoexport' ? 'json' : undefined,
@@ -228,7 +263,11 @@ export function ExportDialog({
             ? `Export collections from ${database}`
             : `Export ${database}.${collection}`
       }
-      subtitle="The built-in engine talks to MongoDB directly — no external binaries required."
+      subtitle={
+        usesTool
+          ? `Runs ${kind} from the MongoDB Database Tools installed on this machine.`
+          : 'The built-in engine talks to MongoDB directly — no external binaries required.'
+      }
       onClose={onClose}
       width={700}
       footer={
@@ -261,13 +300,7 @@ export function ExportDialog({
         </Field>
         <Field label="Format">
           <Select value={kind} onChange={(event) => setKind(event.target.value as ExportKind)}>
-            {FORMAT_OPTIONS.filter(
-              (entry) =>
-                !many ||
-                (entry.value === 'mongodump'
-                  ? scope === 'database'
-                  : entry.value !== 'mongoexport')
-            ).map((entry) => (
+            {FORMAT_OPTIONS.map((entry) => (
               <option key={entry.value} value={entry.value}>
                 {entry.label}
               </option>
@@ -293,12 +326,13 @@ export function ExportDialog({
           ) : (
             <>
               <div className="row" style={{ marginBottom: 6 }}>
-                <Button size="sm" onClick={() => setPicked(available)}>
-                  All
-                </Button>
-                <Button size="sm" onClick={() => setPicked([])}>
-                  None
-                </Button>
+                <Checkbox
+                  label="Select all"
+                  checked={allPicked}
+                  indeterminate={picked.length > 0 && !allPicked}
+                  disabled={available.length === 0}
+                  onChange={(on) => setPicked(on ? available : [])}
+                />
               </div>
               <div className="pick-list">
                 {available.map((name) => (
@@ -315,14 +349,17 @@ export function ExportDialog({
         </Field>
       ) : null}
 
-      {scope === 'database' && !usesTool ? (
+      {many && (scope === 'database' || usesTool) ? (
         <div className="stack" style={{ marginBottom: 12 }}>
           <span className="dim">
             {available === null
               ? 'Looking up the collections…'
-              : `${available.length} collections will be written to ${
-                  target || 'the chosen directory'
-                }/${database}. Views and internal collections are left out.`}
+              : batchSummary({
+                  kind,
+                  wholeDump,
+                  covered,
+                  where: `${target || 'the chosen directory'}/${database}`
+                })}
           </span>
         </div>
       ) : null}
@@ -361,7 +398,9 @@ export function ExportDialog({
         wide
         hint={
           usesTool
-            ? 'Passed to the tool as --query, so it must be strict JSON.'
+            ? kind === 'mongodump' && scope === 'database'
+              ? 'Passed to the tool as --query, so it must be strict JSON. mongodump only filters one collection at a time, so a filter dumps them one by one and leaves the views out.'
+              : 'Passed to the tool as --query, so it must be strict JSON.'
             : 'Shell syntax is allowed, e.g. { createdAt: { $gt: ISODate("2024-01-01") } }'
         }
       >
@@ -443,7 +482,7 @@ export function ExportDialog({
         </div>
       ) : null}
 
-      {kind === 'mongoexport' ? (
+      {kind === 'mongoexport' && !many ? (
         <Field label="Fields" wide hint="Required when exporting CSV through mongoexport.">
           <TextInput value={fields} onChange={(event) => setFields(event.target.value)} />
         </Field>
@@ -479,4 +518,29 @@ export function ExportDialog({
       {error ? <div className="error-box">{error}</div> : null}
     </Modal>
   );
+}
+
+/** What a batch will write, and where, in one sentence for the dialog. */
+function batchSummary({
+  kind,
+  wholeDump,
+  covered,
+  where
+}: {
+  kind: ExportKind;
+  wholeDump: boolean;
+  covered: number;
+  where: string;
+}): string {
+  if (wholeDump) {
+    return `One mongodump run of the whole database into ${where}, views and metadata included — the layout mongorestore reads.`;
+  }
+  const runs = (tool: string) => `one ${tool} run${covered === 1 ? '' : ' each'}`;
+  if (kind === 'mongodump') {
+    return `${plural(covered, 'collection')}, ${runs('mongodump')}, into ${where} — the layout mongorestore reads.`;
+  }
+  if (kind === 'mongoexport') {
+    return `${plural(covered, 'collection')}, ${runs('mongoexport')}, written as ${where}/<collection>.json.`;
+  }
+  return `${plural(covered, 'collection')} will be written to ${where}. Views and internal collections are left out.`;
 }

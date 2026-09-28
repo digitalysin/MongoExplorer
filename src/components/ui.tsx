@@ -73,16 +73,25 @@ export function Checkbox({
   label,
   checked,
   onChange,
-  disabled
+  disabled,
+  indeterminate
 }: {
   label: ReactNode;
   checked: boolean;
   onChange: (checked: boolean) => void;
   disabled?: boolean;
+  /** The dash a "select all" box shows while only some of its items are on. */
+  indeterminate?: boolean;
 }) {
+  // There is no attribute for this state; it only exists as a DOM property.
+  const input = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (input.current) input.current.indeterminate = Boolean(indeterminate);
+  }, [indeterminate]);
   return (
     <label className={`checkbox ${disabled ? 'is-disabled' : ''}`}>
       <input
+        ref={input}
         type="checkbox"
         checked={checked}
         disabled={disabled}

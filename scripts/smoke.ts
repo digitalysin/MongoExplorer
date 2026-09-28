@@ -61,7 +61,7 @@ import {
 } from '../electron/services/transfer.js';
 import { summarizeTransfer } from '../src/lib/transferProgress.js';
 import { detectWrites } from '../shared/writeOps.js';
-import { detectTools, runTool } from '../electron/services/tools.js';
+import { cancelToolJob, detectTools, runTool, runToolBatch } from '../electron/services/tools.js';
 import { encryptionAvailable, getSecrets, setSecrets } from '../electron/services/store.js';
 
 const HOST = '127.0.0.1:27099';
@@ -1578,6 +1578,220 @@ async function main(): Promise<void> {
       assert.equal(result.ok, true);
       assert.equal(await db.collection('people').countDocuments(), 3);
     });
+
+    // --- the tools across several collections, as one job ------------------
+
+    await db.collection('tool_a').insertMany([{ age: 30 }, { age: 40 }, { age: 50 }]);
+    await db.collection('tool_b').insertMany([{ age: 45 }, { age: 20 }]);
+    await db.collection('tool_c').insertMany([{ age: 60 }]);
+    const exportAvailable = Boolean(
+      (await detectTools()).find((entry) => entry.tool === 'mongoexport')?.ok
+    );
+
+    await check('mongodump dumps hand-picked collections, one run each', async () => {
+      const directory = path.join(workDir, 'tool-dump-picked');
+      const progress: TransferProgress[] = [];
+      const result = await runToolBatch(
+        {
+          connectionId: connection.id,
+          tool: 'mongodump',
+          database: DATABASE,
+          collections: ['tool_a', 'tool_c'],
+          directory
+        },
+        (update) => progress.push(update)
+      );
+      assert.equal(result.ok, true);
+      assert.equal(result.processed, 4);
+      assert.deepEqual(
+        result.parts?.map((part) => [part.collection, part.processed]),
+        [
+          ['tool_a', 3],
+          ['tool_c', 1]
+        ]
+      );
+      // The layout mongorestore reads, and nothing that was not chosen.
+      assert.deepEqual(
+        fs.readdirSync(path.join(directory, DATABASE)).filter((name) => name.endsWith('.bson')).sort(),
+        ['tool_a.bson', 'tool_c.bson']
+      );
+      // One job: a single id, and a total that spans both collections.
+      assert.equal(new Set(progress.map((update) => update.jobId)).size, 1);
+      const running = progress.filter((update) => update.phase === 'running');
+      assert.ok(running.every((update) => update.total === 4), 'the total spans the whole job');
+      assert.equal(progress.at(-1)?.phase, 'done');
+    });
+
+    await check('mongodump filters a whole database collection by collection', async () => {
+      // One mongodump run refuses this: "cannot dump using a query without a
+      // specified collection". The batch gives each collection its own run.
+      const directory = path.join(workDir, 'tool-dump-filtered');
+      const result = await runToolBatch(
+        {
+          connectionId: connection.id,
+          tool: 'mongodump',
+          database: DATABASE,
+          collections: ['tool_a', 'tool_b', 'tool_c'],
+          directory,
+          query: '{"age":{"$gte":40}}'
+        },
+        silent
+      );
+      assert.equal(result.ok, true);
+      assert.deepEqual(
+        result.parts?.map((part) => [part.collection, part.processed]),
+        [
+          ['tool_a', 2],
+          ['tool_b', 1],
+          ['tool_c', 1]
+        ]
+      );
+    });
+
+    await check('a whole-database mongodump without a filter stays one run', async () => {
+      const directory = path.join(workDir, 'tool-dump-whole');
+      const progress: TransferProgress[] = [];
+      const result = await runToolBatch(
+        {
+          connectionId: connection.id,
+          tool: 'mongodump',
+          database: DATABASE,
+          collections: [],
+          directory
+        },
+        (update) => progress.push(update)
+      );
+      assert.equal(result.ok, true);
+      assert.equal(result.parts, undefined, 'a single run reports no parts');
+      assert.equal(progress.filter((update) => update.phase === 'starting').length, 1);
+      for (const name of ['tool_a', 'tool_b', 'tool_c', 'people']) {
+        assert.ok(fs.existsSync(path.join(directory, DATABASE, `${name}.bson`)), `${name} dumped`);
+      }
+    });
+
+    await check('a collection that fails does not stop the rest of the batch', async () => {
+      const result = await runToolBatch(
+        {
+          connectionId: connection.id,
+          tool: 'mongodump',
+          database: DATABASE,
+          collections: ['tool_a', 'no_such_collection', 'tool_c'],
+          directory: path.join(workDir, 'tool-dump-partial')
+        },
+        silent
+      );
+      assert.equal(result.ok, false);
+      assert.equal(result.failed, 1);
+      assert.equal(result.processed, 4);
+      const missing = result.parts?.find((part) => part.collection === 'no_such_collection');
+      assert.match(missing?.error ?? '', /does not exist/);
+      assert.deepEqual(
+        result.parts?.filter((part) => !part.error).map((part) => part.collection),
+        ['tool_a', 'tool_c']
+      );
+    });
+
+    await check('Stop ends a tool batch and starts no further runs', async () => {
+      const directory = path.join(workDir, 'tool-dump-stopped');
+      let stopped = false;
+      await assert.rejects(
+        () =>
+          runToolBatch(
+            {
+              connectionId: connection.id,
+              tool: 'mongodump',
+              database: DATABASE,
+              collections: ['tool_a', 'tool_b', 'tool_c'],
+              directory
+            },
+            (update) => {
+              if (!stopped && update.phase === 'running') {
+                stopped = cancelToolJob(update.jobId);
+              }
+            }
+          ),
+        (error: Error) => error.name === 'CancelledError'
+      );
+      assert.ok(stopped, 'the batch should be stoppable while it runs');
+      assert.ok(
+        !fs.existsSync(path.join(directory, DATABASE, 'tool_c.bson')),
+        'no run should start after Stop'
+      );
+    });
+
+    await check('a tool batch refuses a filter that is not strict JSON', async () => {
+      await assert.rejects(
+        () =>
+          runToolBatch(
+            {
+              connectionId: connection.id,
+              tool: 'mongodump',
+              database: DATABASE,
+              collections: ['tool_a'],
+              directory: path.join(workDir, 'tool-dump-bad-filter'),
+              query: '{ age: { $gte: 40 } }'
+            },
+            silent
+          ),
+        (error: Error) => /strict JSON/.test(error.message)
+      );
+    });
+
+    if (exportAvailable) {
+      await check('mongoexport writes one file per chosen collection', async () => {
+        const directory = path.join(workDir, 'tool-export');
+        const result = await runToolBatch(
+          {
+            connectionId: connection.id,
+            tool: 'mongoexport',
+            database: DATABASE,
+            collections: ['tool_a', 'tool_b'],
+            directory,
+            query: '{"age":{"$gte":40}}'
+          },
+          silent
+        );
+        assert.equal(result.ok, true);
+        assert.equal(result.filePath, path.join(directory, DATABASE));
+        assert.deepEqual(
+          result.parts?.map((part) => [part.collection, part.processed]),
+          [
+            ['tool_a', 2],
+            ['tool_b', 1]
+          ]
+        );
+        assert.deepEqual(fs.readdirSync(path.join(directory, DATABASE)).sort(), [
+          'tool_a.json',
+          'tool_b.json'
+        ]);
+        const lines = fs
+          .readFileSync(path.join(directory, DATABASE, 'tool_a.json'), 'utf8')
+          .trim()
+          .split('\n');
+        assert.equal(lines.length, 2);
+      });
+
+      await check('a mongoexport batch imports back as a directory', async () => {
+        // Same layout as the built-in batch export, so the directory import
+        // finds the files one level down and reads mongoexport's output.
+        const result = await importDirectory(
+          {
+            connectionId: connection.id,
+            database: 'tool_round_trip_db',
+            directory: path.join(workDir, 'tool-export'),
+            mode: 'insert'
+          },
+          silent
+        );
+        assert.equal(result.ok, true);
+        assert.equal(result.processed, 3);
+        const copy = getDb(connection.id, 'tool_round_trip_db');
+        assert.equal(await copy.collection('tool_a').countDocuments({ age: { $gte: 40 } }), 2);
+        await copy.dropDatabase();
+      });
+    } else {
+      console.log('  --  mongoexport not installed; skipped the mongoexport batch checks');
+    }
   } else {
     console.log('  --  mongodump not installed; skipped the external-tool checks');
   }

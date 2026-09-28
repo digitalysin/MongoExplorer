@@ -354,6 +354,36 @@ async function pickCollection(window: BrowserWindow, name: string): Promise<bool
   `);
 }
 
+/** The export picker's select-all box: whether it is there, on, and half-on. */
+async function selectAllBox(
+  window: BrowserWindow,
+  press = false
+): Promise<{ found: boolean; checked: boolean; indeterminate: boolean }> {
+  return window.webContents.executeJavaScript(`
+    (() => {
+      const box = [...document.querySelectorAll('.modal .checkbox')].find(
+        (node) => node.textContent.trim() === 'Select all'
+      );
+      const input = box?.querySelector('input[type=checkbox]');
+      if (!input) return { found: false, checked: false, indeterminate: false };
+      if (${press}) input.click();
+      return { found: true, checked: input.checked, indeterminate: input.indeterminate };
+    })()
+  `);
+}
+
+/** The values a select offers, found by its field label. */
+async function optionsInField(window: BrowserWindow, label: string): Promise<string[]> {
+  return window.webContents.executeJavaScript(`
+    (() => {
+      const field = [...document.querySelectorAll('.modal .field')].find((node) =>
+        node.querySelector('.field-label')?.textContent?.startsWith(${JSON.stringify(label)})
+      );
+      return [...(field?.querySelectorAll('select.input option') ?? [])].map((option) => option.value);
+    })()
+  `);
+}
+
 /** Waits for a selector's text to match, rather than guessing how long a job takes. */
 async function waitForText(
   window: BrowserWindow,
@@ -1128,10 +1158,20 @@ async function main(): Promise<void> {
   await waitForText(window, '.modal .field-label', /Collections — \d+ of [1-9]/, 5000);
   const pickable = await count(window, '.pick-list .checkbox');
   if (pickable < 2) throw new Error(`the picker should list the collections, saw ${pickable}`);
-  if (!(await click(window, '.modal .btn', 'None'))) {
-    throw new Error('the picker has no way to clear the selection');
+  // Opened on one collection, so the box starts half-on: a press selects every
+  // collection, and the next clears them all.
+  for (let press = 0; press < 2; press += 1) {
+    if ((await fieldLabel(window, 'Collections')).includes(' 0 of ')) break;
+    if (!(await selectAllBox(window, true)).found) {
+      throw new Error('the picker has no select-all box');
+    }
+    await wait(200);
   }
-  await wait(200);
+  if (!(await fieldLabel(window, 'Collections')).includes(' 0 of ')) {
+    throw new Error(
+      `select all should clear the selection: ${await fieldLabel(window, 'Collections')}`
+    );
+  }
   await pickCollection(window, 'orders');
   await pickCollection(window, 'customers');
   await wait(300);
@@ -1139,6 +1179,17 @@ async function main(): Promise<void> {
     throw new Error(
       `the picker should count what is chosen: ${await fieldLabel(window, 'Collections')}`
     );
+  }
+  const partly = await selectAllBox(window);
+  if (partly.checked || !partly.indeterminate) {
+    throw new Error('with some collections chosen, select all should show as half-on');
+  }
+  // The external tools cover several collections too, not just one.
+  const formats = await optionsInField(window, 'Format');
+  for (const tool of ['mongodump', 'mongoexport']) {
+    if (!formats.includes(tool)) {
+      throw new Error(`${tool} should be offered for chosen collections: ${formats.join(', ')}`);
+    }
   }
   const manyDir = path.join(workDir, 'batch-export');
   await fill(window, '.modal .form-grid .row .input', manyDir);
